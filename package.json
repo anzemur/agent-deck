@@ -1,0 +1,330 @@
+{
+  "name": "agent-deck",
+  "displayName": "Agent Deck",
+  "description": "Worktrees and terminals, linked. Click a worktree to jump to its terminal; focus a terminal to jump to its worktree.",
+  "version": "0.1.0",
+  "publisher": "anzemur",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.93.0"
+  },
+  "categories": [
+    "Other",
+    "SCM Providers"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anzemur/agent-deck"
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "agentDeck",
+          "title": "Agent Deck",
+          "icon": "media/deck.svg"
+        }
+      ]
+    },
+    "views": {
+      "agentDeck": [
+        {
+          "id": "agentDeck.worktrees",
+          "name": "Worktrees"
+        },
+        {
+          "id": "agentDeck.files",
+          "name": "Files"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "agentDeck.worktrees",
+        "contents": "No git repositories found in this window.\n[Add Repository](command:agentDeck.addRepository)"
+      }
+    ],
+    "commands": [
+      {
+        "command": "agentDeck.refresh",
+        "title": "Refresh",
+        "icon": "$(refresh)",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.addRepository",
+        "title": "Add Repository\u2026",
+        "icon": "$(repo-create)",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.removeRepository",
+        "title": "Remove Repository from Deck",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.newWorktree",
+        "title": "New Worktree\u2026",
+        "icon": "$(add)",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.removeWorktree",
+        "title": "Delete Worktree\u2026",
+        "icon": "$(trash)",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.selectWorktree",
+        "title": "Switch to Worktree",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.newTerminal",
+        "title": "New Terminal in Worktree",
+        "icon": "$(terminal)",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.showTerminal",
+        "title": "Show Terminal",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.killTerminal",
+        "title": "Kill Terminal",
+        "icon": "$(close)",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.renameTerminal",
+        "title": "Rename Terminal\u2026",
+        "icon": "$(edit)",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.openInNewWindow",
+        "title": "Open Worktree in New Window",
+        "icon": "$(empty-window)",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.revealInFinder",
+        "title": "Reveal in Finder",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.copyPath",
+        "title": "Copy Path",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.quickSwitch",
+        "title": "Quick Switch Worktree\u2026",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.nextWorktree",
+        "title": "Next Worktree",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.prevWorktree",
+        "title": "Previous Worktree",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.refreshFiles",
+        "title": "Refresh Files",
+        "icon": "$(refresh)",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.collapseFiles",
+        "title": "Collapse All",
+        "icon": "$(collapse-all)",
+        "category": "Agent Deck"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "agentDeck.newWorktree",
+          "when": "view == agentDeck.worktrees",
+          "group": "navigation@1"
+        },
+        {
+          "command": "agentDeck.addRepository",
+          "when": "view == agentDeck.worktrees",
+          "group": "navigation@2"
+        },
+        {
+          "command": "agentDeck.refresh",
+          "when": "view == agentDeck.worktrees",
+          "group": "navigation@3"
+        },
+        {
+          "command": "agentDeck.refreshFiles",
+          "when": "view == agentDeck.files",
+          "group": "navigation@1"
+        },
+        {
+          "command": "agentDeck.collapseFiles",
+          "when": "view == agentDeck.files",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "agentDeck.newWorktree",
+          "when": "view == agentDeck.worktrees && viewItem == repo",
+          "group": "inline"
+        },
+        {
+          "command": "agentDeck.newWorktree",
+          "when": "view == agentDeck.worktrees && viewItem == repo",
+          "group": "1_main@1"
+        },
+        {
+          "command": "agentDeck.removeRepository",
+          "when": "view == agentDeck.worktrees && viewItem == repo",
+          "group": "9_danger@1"
+        },
+        {
+          "command": "agentDeck.newTerminal",
+          "when": "view == agentDeck.worktrees && viewItem =~ /^worktree/",
+          "group": "inline@1"
+        },
+        {
+          "command": "agentDeck.openInNewWindow",
+          "when": "view == agentDeck.worktrees && viewItem =~ /^worktree/",
+          "group": "inline@2"
+        },
+        {
+          "command": "agentDeck.newTerminal",
+          "when": "view == agentDeck.worktrees && viewItem =~ /^worktree/",
+          "group": "1_main@1"
+        },
+        {
+          "command": "agentDeck.openInNewWindow",
+          "when": "view == agentDeck.worktrees && viewItem =~ /^worktree/",
+          "group": "1_main@2"
+        },
+        {
+          "command": "agentDeck.revealInFinder",
+          "when": "view == agentDeck.worktrees && viewItem =~ /^worktree/",
+          "group": "2_path@1"
+        },
+        {
+          "command": "agentDeck.copyPath",
+          "when": "view == agentDeck.worktrees && viewItem =~ /^worktree/",
+          "group": "2_path@2"
+        },
+        {
+          "command": "agentDeck.removeWorktree",
+          "when": "view == agentDeck.worktrees && viewItem == worktree",
+          "group": "9_danger@1"
+        },
+        {
+          "command": "agentDeck.renameTerminal",
+          "when": "view == agentDeck.worktrees && viewItem == terminal",
+          "group": "inline@1"
+        },
+        {
+          "command": "agentDeck.killTerminal",
+          "when": "view == agentDeck.worktrees && viewItem == terminal",
+          "group": "inline@2"
+        },
+        {
+          "command": "agentDeck.renameTerminal",
+          "when": "view == agentDeck.worktrees && viewItem == terminal",
+          "group": "1_main@1"
+        },
+        {
+          "command": "agentDeck.killTerminal",
+          "when": "view == agentDeck.worktrees && viewItem == terminal",
+          "group": "9_danger@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "agentDeck.selectWorktree",
+          "when": "false"
+        },
+        {
+          "command": "agentDeck.showTerminal",
+          "when": "false"
+        },
+        {
+          "command": "agentDeck.killTerminal",
+          "when": "false"
+        },
+        {
+          "command": "agentDeck.renameTerminal",
+          "when": "false"
+        },
+        {
+          "command": "agentDeck.removeRepository",
+          "when": "false"
+        },
+        {
+          "command": "agentDeck.revealInFinder",
+          "when": "false"
+        },
+        {
+          "command": "agentDeck.copyPath",
+          "when": "false"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "agentDeck.quickSwitch",
+        "key": "cmd+alt+w",
+        "mac": "cmd+alt+w"
+      },
+      {
+        "command": "agentDeck.nextWorktree",
+        "key": "cmd+alt+down",
+        "mac": "cmd+alt+down"
+      },
+      {
+        "command": "agentDeck.prevWorktree",
+        "key": "cmd+alt+up",
+        "mac": "cmd+alt+up"
+      }
+    ],
+    "configuration": {
+      "title": "Agent Deck",
+      "properties": {
+        "agentDeck.terminalLocation": {
+          "type": "string",
+          "enum": [
+            "panel",
+            "editor"
+          ],
+          "default": "panel",
+          "description": "Where new worktree terminals open. 'editor' gives each agent a full-size tab."
+        },
+        "agentDeck.worktreeParentDir": {
+          "type": "string",
+          "default": "",
+          "description": "Where new worktrees are created. Empty = sibling folder '<repo>.worktrees' next to the repository. Supports ~."
+        },
+        "agentDeck.startupCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Command typed into every new worktree terminal, e.g. 'claude'. Empty = plain shell."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "./test/run.sh",
+    "package": "npx -y @vscode/vsce package"
+  }
+}
