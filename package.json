@@ -420,6 +420,11 @@
           "type": "boolean",
           "default": true,
           "description": "\u2318\u21e7F searches only the active worktree (via 'files to include'). Turn off to get the normal workspace-wide search."
+        },
+        "agentDeck.showOnStartup": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the Agent Deck sidebar when the window opens or reloads."
         }
       }
     }

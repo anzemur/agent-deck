@@ -1644,6 +1644,11 @@ function activate(ctx) {
     }),
   );
 
+  // Open the Agent Deck sidebar on start / reload instead of whatever was showing (usually Explorer).
+  if (vscode.workspace.getConfiguration('agentDeck').get('showOnStartup', true)) {
+    vscode.commands.executeCommand('workbench.view.extension.agentDeck').then(undefined, () => {});
+  }
+
   deck.refresh().then(async () => {
     updateChrome();
     syncFromTerminal(vscode.window.activeTerminal);

@@ -22,7 +22,9 @@ exports.run = async function () {
   const model = () => ext.exports.model();
   const wtModel = (w) => model().worktrees.find((x) => x.path === w.path);
   const panel = ext.exports.panel;
-  await vscode.commands.executeCommand('agentDeck.worktrees.focus');
+  // showOnStartup: the Agent Deck sidebar opened on its own, so the panel resolved without help.
+  await until(() => !!panel.view, 'Agent Deck sidebar shown on startup', 15000);
+  console.log('✓ Agent Deck sidebar opens on startup');
   await until(() => deck.worktrees.length === 3, '3 worktrees');
   const names = deck.worktrees.map((w) => w.branch).sort();
   assert.deepStrictEqual(names, ['feat-a', 'feat-b', 'main']);
