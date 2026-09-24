@@ -182,11 +182,6 @@
           "group": "navigation@1"
         },
         {
-          "command": "agentDeck.addRepository",
-          "when": "view == agentDeck.worktrees",
-          "group": "navigation@2"
-        },
-        {
           "command": "agentDeck.refresh",
           "when": "view == agentDeck.worktrees",
           "group": "navigation@3"
@@ -407,8 +402,8 @@
         },
         "agentDeck.startupCommand": {
           "type": "string",
-          "default": "",
-          "description": "Command typed into every new worktree terminal, e.g. 'claude'. Empty = plain shell."
+          "default": "claude",
+          "description": "Command run in the first terminal opened for a worktree. Extra terminals start as a plain shell. Empty = never."
         }
       }
     }

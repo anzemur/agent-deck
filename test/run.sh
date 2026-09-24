@@ -26,6 +26,9 @@ export AGENT_DECK_TEST_BIN="$TMP/bin"
 git -C "$TMP/repo" worktree add -q -b feat-a "$TMP/wt/a"
 git -C "$TMP/repo" worktree add -q -b feat-b "$TMP/wt/b"
 mkdir -p "$TMP/ud/User"
-echo '{"security.workspace.trust.enabled": false, "terminal.integrated.defaultProfile.osx": "zsh"}' > "$TMP/ud/User/settings.json"
+cat > "$TMP/ud/User/settings.json" <<JSON
+{"security.workspace.trust.enabled": false, "terminal.integrated.defaultProfile.osx": "zsh",
+ "agentDeck.startupCommand": "$TMP/bin/claude 120"}
+JSON
 "${CODE_BIN:-code}" --new-window --disable-extensions --user-data-dir "$TMP/ud" \
   --extensionDevelopmentPath="$HERE" --extensionTestsPath="$HERE/test/suite.js" "$TMP/repo"

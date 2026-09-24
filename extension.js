@@ -515,7 +515,8 @@ class Deck {
   createTerminal(wt, { show = true, preserveFocus = false } = {}) {
     const cfg = vscode.workspace.getConfiguration('agentDeck');
     const base = wtLabel(wt);
-    const taken = new Set(this.terminalsOf(wt.path).map((t) => this.displayName(t)));
+    const existing = this.terminalsOf(wt.path);
+    const taken = new Set(existing.map((t) => this.displayName(t)));
     let name = base;
     for (let i = 2; taken.has(name); i++) name = `${base} · ${i}`;
 
@@ -532,8 +533,9 @@ class Deck {
     this.lastTerminal.set(wt.path, terminal);
     this.saveLinks();
 
+    // Only the first terminal of a worktree starts the agent; extra ones are plain shells.
     const startup = /** @type {string} */ (cfg.get('startupCommand') ?? '').trim();
-    if (startup) terminal.sendText(startup, true);
+    if (startup && !existing.length) terminal.sendText(startup, true);
     if (show) terminal.show(preserveFocus);
     this._onChange.fire();
     return terminal;

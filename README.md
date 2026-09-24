@@ -2,7 +2,7 @@
 
 Worktrees and terminals, linked, for running many coding agents at once in VS Code / Cursor.
 
-- **Worktrees view** (activity bar → Agent Deck): every git worktree of every repo in the window, plus any repo you pin with *Add Repository*.
+- **Worktrees view** (activity bar → Agent Deck): every git worktree of every repo in the window.
 - **Click a worktree** → the dropdown opens/closes and its linked terminal comes to the front (nothing is created; use *New terminal*).
 - Each worktree's dropdown has **Terminals** (linked terminals, click to focus) and **Changes** (Staged / Unstaged files — click for a side-by-side diff, `+`/`−` to stage/unstage a file or the whole group).
 - **Focus a terminal** (tab, panel, `⌘⌥↑/↓`) → the worktree view selects its worktree and the **Files** view switches to that worktree's files.
@@ -15,7 +15,7 @@ Worktrees and terminals, linked, for running many coding agents at once in VS Co
 | Setting | Default | |
 |---|---|---|
 | `agentDeck.terminalLocation` | `panel` | `editor` gives each agent a full-size tab |
-| `agentDeck.startupCommand` | `""` | typed into each new worktree terminal, e.g. `claude` |
+| `agentDeck.startupCommand` | `claude` | run in the first terminal of a worktree (extra terminals are plain shells); empty = never |
 | `agentDeck.worktreeParentDir` | `""` | where new worktrees go |
 
 ## Keys

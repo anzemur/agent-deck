@@ -67,6 +67,15 @@ exports.run = async function () {
   await until(() => vscode.window.activeTerminal?.name === 'feat-b · 2', 'second terminal');
   assert.strictEqual(deck.terminalsOf(b.path).length, 2);
   console.log('✓ second terminal in feat-b named "feat-b · 2"');
+  {
+    const first = vscode.window.terminals.find((t) => t.name === 'feat-b');
+    const second = vscode.window.terminals.find((t) => t.name === 'feat-b · 2');
+    await until(() => deck.procs.get(first)?.agent === 'claude', 'first terminal started claude', 15000);
+    await sleep(1500);
+    await deck.poll();
+    assert.strictEqual(deck.procs.get(second)?.agent, undefined);
+    console.log('✓ first terminal of a worktree starts claude; second is a plain shell');
+  }
 
   // A plain terminal opened in worktree A's folder is associated by cwd.
   const plain = vscode.window.createTerminal({ name: 'plain', cwd: a.path });
