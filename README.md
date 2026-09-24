@@ -27,7 +27,7 @@ Worktrees and terminals, linked, for running many coding agents at once in VS Co
 
 ## Keys
 
-`⌘⇧F` search only the active worktree (off: `agentDeck.scopeSearch`) · `⌘⌥N` go to the agent that needs you · `⌘⌥W` quick switch · `⌘⌥↓` / `⌘⌥↑` next / previous worktree
+`⌘P` go to a file in the active worktree, recent files first (`>`, `@`, `#`, `:` hand over to the regular ⌘P; off: `agentDeck.scopeQuickOpen`) · `⌘⇧F` search only the active worktree (off: `agentDeck.scopeSearch`) · `⌘⌥N` go to the agent that needs you · `⌘⌥W` quick switch · `⌘⌥↓` / `⌘⌥↑` next / previous worktree
 
 ## Develop
 

@@ -198,6 +198,12 @@
         "title": "Go to Agent That Needs You",
         "icon": "$(bell-dot)",
         "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.goToFileInWorktree",
+        "title": "Go to File in Active Worktree\u2026",
+        "icon": "$(go-to-file)",
+        "category": "Agent Deck"
       }
     ],
     "menus": {
@@ -396,6 +402,12 @@
         "command": "agentDeck.nextAttention",
         "key": "cmd+alt+n",
         "mac": "cmd+alt+n"
+      },
+      {
+        "command": "agentDeck.goToFileInWorktree",
+        "key": "cmd+p",
+        "mac": "cmd+p",
+        "when": "config.agentDeck.scopeQuickOpen && !inQuickOpen"
       }
     ],
     "configuration": {
@@ -457,6 +469,11 @@
           "type": "boolean",
           "default": true,
           "description": "Also show a macOS notification (with sound) when Cursor/VS Code isn't the front app."
+        },
+        "agentDeck.scopeQuickOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "\u2318P lists only the active worktree's files (typing >, @, # or : hands over to the regular Quick Open). In the main checkout \u2318P is the normal one. Turn off to always get the regular \u2318P."
         }
       }
     }

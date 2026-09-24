@@ -546,6 +546,12 @@ function searchRootFor(wt, folders) {
   return link;
 }
 
+/** Every file git knows about in a worktree: tracked plus untracked-but-not-ignored. */
+async function listWorktreeFiles(wtPath) {
+  const out = await git(wtPath, ['ls-files', '--cached', '--others', '--exclude-standard', '-z']).catch(() => '');
+  return [...new Set(out.split('\0').filter(Boolean))];
+}
+
 // ---------------------------------------------------------------- deck state
 
 class Deck {
@@ -1436,6 +1442,84 @@ function activate(ctx) {
   };
   deck.onChange(updateBadge);
 
+  // ---- Go to File, scoped to the active worktree ------------------------------------------------
+
+  /** Recently opened files per worktree (most recent first), shown first like ⌘P does. */
+  const recentFiles = new Map(/** @type {[string, string[]][]} */ (ctx.workspaceState.get('agentDeck.recentFiles', [])));
+  const noteOpened = (fsPath) => {
+    const wt = deck.worktreeContaining(fsPath);
+    if (!wt) return;
+    const rel = path.relative(wt.path, fsPath);
+    const list = [rel, ...(recentFiles.get(wt.path) ?? []).filter((r) => r !== rel)].slice(0, 30);
+    recentFiles.set(wt.path, list);
+    ctx.workspaceState.update('agentDeck.recentFiles', [...recentFiles]);
+  };
+
+  const goToFile = async () => {
+    const wt = deck.active ? deck.findWorktree(deck.active) : undefined;
+    const folders = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
+    const isRoot = !wt || folders.some((f) => {
+      try {
+        return fs.realpathSync(f) === fs.realpathSync(wt.path);
+      } catch {
+        return f === wt.path;
+      }
+    });
+    // The main checkout is the workspace itself: the built-in ⌘P already covers it (and more).
+    if (!wt || isRoot) return vscode.commands.executeCommand('workbench.action.quickOpen');
+
+    const qp = vscode.window.createQuickPick();
+    qp.title = `Go to File · ${wtTitle(wt, deck)}`;
+    qp.placeholder = `Search files in ${wtLabel(wt)} (> commands, @ symbols, : line go to the regular ⌘P)`;
+    qp.matchOnDescription = true;
+    qp.busy = true;
+    qp.show();
+
+    const openSide = { iconPath: new vscode.ThemeIcon('split-horizontal'), tooltip: 'Open to the Side' };
+    const recent = recentFiles.get(wt.path) ?? [];
+    const toItem = (rel) => {
+      const uri = vscode.Uri.file(path.join(wt.path, rel));
+      const dir = path.dirname(rel);
+      return {
+        label: path.basename(rel),
+        description: dir === '.' ? '' : dir,
+        iconPath: vscode.ThemeIcon.File,
+        resourceUri: uri,
+        uri,
+        buttons: [openSide],
+      };
+    };
+    const files = await listWorktreeFiles(wt.path);
+    const known = new Set(files);
+    const recentItems = recent.filter((r) => known.has(r)).map((r) => toItem(r));
+    const rest = files.filter((r) => !recent.includes(r)).sort((a, b) => a.length - b.length || a.localeCompare(b));
+    qp.items = [
+      ...(recentItems.length ? [{ label: 'recently opened', kind: vscode.QuickPickItemKind.Separator }, ...recentItems] : []),
+      { label: `${files.length} files`, kind: vscode.QuickPickItemKind.Separator },
+      ...rest.map((r) => toItem(r)),
+    ];
+    qp.busy = false;
+
+    const open = async (item, beside) => {
+      if (!item?.uri) return;
+      qp.hide();
+      await vscode.window.showTextDocument(item.uri, { preview: !beside, viewColumn: beside ? vscode.ViewColumn.Beside : undefined });
+    };
+    qp.onDidChangeValue((v) => {
+      // Prefixes that mean "not a file name": hand over to the built-in Quick Open.
+      if (/^[>@#:%]/.test(v)) {
+        qp.hide();
+        vscode.commands.executeCommand('workbench.action.quickOpen', v);
+      }
+    });
+    qp.onDidAccept(() => open(qp.selectedItems[0] ?? qp.activeItems[0], false));
+    qp.onDidTriggerItemButton((e) => open(e.item, true));
+    qp.onDidHide(() => qp.dispose());
+    lastPicker = qp; // for tests
+  };
+  /** @type {vscode.QuickPick<any> | undefined} */
+  let lastPicker;
+
   /** Jump to a terminal that needs you: its worktree becomes active and the terminal is focused. */
   const goTo = (t) => {
     const wt = deck.worktreeOf(t);
@@ -1570,6 +1654,7 @@ function activate(ctx) {
     vscode.workspace.registerTextDocumentContentProvider(GIT_SCHEME, new GitContent()),
 
     vscode.window.onDidChangeActiveTerminal(syncFromTerminal),
+    vscode.window.onDidChangeActiveTextEditor((ed) => ed?.document.uri.scheme === 'file' && noteOpened(ed.document.uri.fsPath)),
     vscode.window.onDidOpenTerminal(() => {
       deck.adoptTerminals();
       setTimeout(() => deck.poll(), 1500);
@@ -1658,6 +1743,7 @@ function activate(ctx) {
       focus?.show(true);
       setTimeout(() => deck.poll(), 3000);
     }),
+    vscode.commands.registerCommand('agentDeck.goToFileInWorktree', () => goToFile()),
     vscode.commands.registerCommand('agentDeck.findInWorktree', () => {
       // Scope Search to the active worktree. An absolute path in "files to include" also works for
       // worktrees outside the open folder (e.g. ~/.superset/worktrees/...). For the main checkout,
@@ -1877,7 +1963,7 @@ function activate(ctx) {
     }
   });
 
-  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge };
+  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker };
 }
 
 function deactivate() {}

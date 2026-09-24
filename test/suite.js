@@ -311,8 +311,12 @@ exports.run = async function () {
     const oldPlain = vscode.window.createTerminal({ name: 'old-plain', cwd: a.path });
     const busy = vscode.window.createTerminal({ name: 'old-busy', cwd: a.path });
     busy.sendText('sleep 60');
-    await sleep(2500);
-    const { plan, skipped } = await deck.refreshTerminals();
+    // A brand-new zsh briefly runs start-up helpers; wait until it has settled.
+    let plan, skipped;
+    await until(async () => {
+      ({ plan, skipped } = await deck.refreshTerminals());
+      return plan.some((p) => p.shown === 'old-plain') && skipped.some((s) => s.startsWith('old-busy'));
+    }, 'shells settled', 20000);
     const byName = (n) => plan.find((p) => p.shown === n);
     assert.match(byName(term.name)?.command ?? '', /--resume sess-b$/);
     assert.ok(byName('old-plain') && !byName('old-plain').command);
@@ -341,6 +345,38 @@ exports.run = async function () {
     assert.strictEqual(vscode.window.activeTextEditor.selection.active.line, 2);
     assert.ok(!vscode.window.tabGroups.all.flatMap((g) => g.tabs).some((t) => t.input?.uri?.fsPath?.startsWith(process.env.AGENT_DECK_SEARCH_LINKS)));
     console.log('✓ a search result opened via the symlink is swapped to the real file, same line, link tab closed');
+  }
+
+  // ⌘P in a worktree: only that worktree's files (tracked + untracked, not ignored), recent first.
+  {
+    const fsx = require('fs');
+    fsx.writeFileSync(path.join(a.path, '.gitignore'), 'ignored.log\n');
+    fsx.writeFileSync(path.join(a.path, 'ignored.log'), 'x');
+    fsx.writeFileSync(path.join(a.path, 'fresh-untracked.ts'), 'x');
+    const files = await ext.exports.listWorktreeFiles(a.path);
+    assert.ok(files.includes('README.md') && files.includes('fresh-untracked.ts') && !files.includes('ignored.log'), JSON.stringify(files));
+    deck.setActive(a.path);
+    await vscode.commands.executeCommand('agentDeck.goToFileInWorktree');
+    let qp;
+    await until(() => (qp = ext.exports.picker()) && !qp.busy && qp.items.length > 0, 'picker filled');
+    const labels = qp.items.filter((i) => i.kind !== vscode.QuickPickItemKind.Separator).map((i) => i.label);
+    assert.ok(labels.includes('fresh-untracked.ts') && !labels.includes('ignored.log'));
+    assert.ok(qp.items.every((i) => i.kind === vscode.QuickPickItemKind.Separator || i.uri.fsPath.startsWith(a.path)));
+    console.log(`✓ ⌘P in feat-a lists ${labels.length} files, all inside feat-a (untracked yes, ignored no)`);
+    // Accept "fresh-untracked.ts" → opens; next time it's first under "recently opened".
+    qp.activeItems = [qp.items.find((i) => i.label === 'fresh-untracked.ts')];
+    qp.selectedItems = qp.activeItems;
+    await vscode.commands.executeCommand('workbench.action.acceptSelectedQuickOpenItem');
+    await until(() => vscode.window.activeTextEditor?.document.uri.fsPath.endsWith('fresh-untracked.ts'), 'file opened');
+    await vscode.commands.executeCommand('agentDeck.goToFileInWorktree');
+    await until(() => (qp = ext.exports.picker()) && !qp.busy && qp.items.length > 0 && qp.items[0].label === 'recently opened', 'recent section');
+    assert.strictEqual(qp.items[1].label, 'fresh-untracked.ts');
+    console.log('✓ opening a file from the picker works; it then shows first under "recently opened"');
+    // Typing ">" hands over to the regular Quick Open (commands).
+    qp.value = '>';
+    await until(() => !qp.visible || qp.value === '', 'handed over');
+    await vscode.commands.executeCommand('workbench.action.closeQuickOpen');
+    console.log('✓ typing ">" hands over to the regular ⌘P / command palette');
   }
   console.log('ALL PASSED');
 };
