@@ -189,14 +189,23 @@ exports.run = async function () {
     const enc = (p) => p.replace(/[^a-zA-Z0-9]/g, '-');
     const pdir = path.join(process.env.AGENT_DECK_CLAUDE_PROJECTS, enc(b.path));
     fsx.mkdirSync(pdir, { recursive: true });
-    fsx.writeFileSync(path.join(pdir, 'sess-b.jsonl'), JSON.stringify({ type: 'user', cwd: b.path }) + '\n');
+    // Like a real long session: 3 MB of lines from another (deleted) worktree before the real cwd.
+    const filler = JSON.stringify({ type: 'user', cwd: '/gone/worktree', pad: 'x'.repeat(1000) }) + '\n';
+    fsx.writeFileSync(path.join(pdir, 'sess-b.jsonl'), filler.repeat(3000) + JSON.stringify({ type: 'user', cwd: b.path }) + '\n');
+    // Main checkout session whose transcript only ever mentions another dir: resolved from the dir name.
+    const mdir = path.join(process.env.AGENT_DECK_CLAUDE_PROJECTS, enc(main.path));
+    fsx.mkdirSync(mdir, { recursive: true });
+    fsx.writeFileSync(path.join(mdir, 'sess-main.jsonl'), filler.repeat(3000));
     const all = {};
-    all[deck.recordKey] = [{ sessionId: 'sess-b', wtPath: b.path, name: 'resumed-b' }];
+    all[deck.recordKey] = [
+      { sessionId: 'sess-b', wtPath: b.path, name: 'resumed-b' },
+      { sessionId: 'sess-main', wtPath: main.path, name: 'resumed-main' },
+    ];
     fsx.mkdirSync(path.dirname(deck.recordFile), { recursive: true });
     fsx.writeFileSync(deck.recordFile, JSON.stringify(all));
     const before = new Set(vscode.window.terminals);
     const n = await deck.resumeAgents();
-    assert.strictEqual(n, 1);
+    assert.strictEqual(n, 2);
     // Find the terminal that got the resume command: its fake claude has "--resume sess-b" in argv.
     let pid;
     await until(() => {
@@ -204,7 +213,8 @@ exports.run = async function () {
       pid = out.split('\n')[0];
       return !!pid;
     }, 'resumed claude process', 15000);
-    console.log('✓ recorded session resumed with `claude --resume sess-b` after restart');
+    await until(() => require('child_process').spawnSync('pgrep', ['-f', 'claude 120 --resume sess-main']).stdout.toString().trim(), 'main session resumed', 15000);
+    console.log('✓ both recorded sessions resumed after restart, incl. one whose 3 MB transcript starts in another dir');
 
     // Claude's pid file tells us the session id and busy/idle.
     fsx.writeFileSync(path.join(process.env.AGENT_DECK_CLAUDE_SESSIONS, `${pid}.json`), JSON.stringify({ pid: Number(pid), sessionId: 'sess-b', status: 'busy' }));
@@ -219,7 +229,7 @@ exports.run = async function () {
     console.log('✓ pid file status idle → idle');
 
     const saved = JSON.parse(fsx.readFileSync(deck.recordFile, 'utf8'))[deck.recordKey];
-    assert.deepStrictEqual(saved.map((r) => [r.sessionId, r.wtPath]), [['sess-b', b.path]]);
+    assert.ok(saved.some((r) => r.sessionId === 'sess-b' && r.wtPath === b.path));
     console.log('✓ running session recorded for the next restart');
     assert.strictEqual(await deck.resumeAgents(), 0);
     console.log('✓ a session that is still alive is not resumed twice');

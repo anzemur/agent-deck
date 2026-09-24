@@ -273,10 +273,13 @@ function liveClaudeSessions() {
 
 /**
  * Where to run `claude --resume <id>`: resume looks the session up in the project of the current
- * directory, so it must be the directory the transcript is stored under.
+ * directory, so it must be the directory the transcript is stored under (not wherever the session
+ * later cd'd to). Known directories are tried first; otherwise the whole transcript is scanned.
+ * @param {string[]} candidates
  * @returns {string | undefined}
  */
-function resumeDirFor(sessionId) {
+function resumeDirFor(sessionId, candidates) {
+  const enc = (p) => p.replace(/[^a-zA-Z0-9]/g, '-');
   let dirs = [];
   try {
     dirs = fs.readdirSync(CLAUDE_PROJECTS);
@@ -284,10 +287,24 @@ function resumeDirFor(sessionId) {
   for (const d of dirs) {
     const file = path.join(CLAUDE_PROJECTS, d, `${sessionId}.jsonl`);
     if (!fs.existsSync(file)) continue;
-    const head = fs.readFileSync(file, 'utf8').slice(0, 2 * 1024 * 1024);
-    for (const m of head.matchAll(/"cwd":"((?:[^"\\]|\\.)*)"/g)) {
-      const cwd = JSON.parse(`"${m[1]}"`);
-      if (cwd.replace(/[^a-zA-Z0-9]/g, '-') === d) return cwd;
+    const known = candidates.find((c) => enc(c) === d);
+    if (known) return known;
+    // Stream the file in chunks: long sessions run to tens of MB and the matching cwd can be anywhere.
+    const fd = fs.openSync(file, 'r');
+    try {
+      const buf = Buffer.alloc(4 * 1024 * 1024);
+      let carry = '';
+      let n;
+      while ((n = fs.readSync(fd, buf, 0, buf.length, null)) > 0) {
+        const text = carry + buf.toString('utf8', 0, n);
+        for (const m of text.matchAll(/"cwd":"((?:[^"\\]|\\.)*)"/g)) {
+          const cwd = JSON.parse(`"${m[1]}"`);
+          if (enc(cwd) === d) return cwd;
+        }
+        carry = text.slice(-4096);
+      }
+    } finally {
+      fs.closeSync(fd);
     }
   }
   return undefined;
@@ -646,10 +663,15 @@ class Deck {
       });
 
       let resumed = 0;
+      /** @type {string[]} */
+      const failed = [];
       for (const r of todo) {
         const wt = /** @type {Worktree} */ (this.findWorktree(r.wtPath));
-        const dir = resumeDirFor(r.sessionId);
-        if (!dir) continue; // transcript gone
+        const dir = resumeDirFor(r.sessionId, [r.wtPath, ...this.worktrees.map((w) => w.path)]);
+        if (!dir) {
+          failed.push(r.sessionId);
+          continue;
+        }
         const command = `${base} --resume ${r.sessionId}`;
         const pick = spare.findIndex((t) => t.name === r.name);
         const reuse = spare.splice(pick >= 0 ? pick : 0, spare.length ? 1 : 0)[0];
@@ -663,6 +685,11 @@ class Deck {
         resumed++;
       }
       this.saveLinks();
+      if (failed.length) {
+        vscode.window.showWarningMessage(
+          `Agent Deck: could not find the transcript for ${failed.length} Claude session(s) to resume: ${failed.join(', ')}. Resume manually with \`claude --resume <id>\`.`,
+        );
+      }
       return resumed;
     } finally {
       this.recordReady = true;
