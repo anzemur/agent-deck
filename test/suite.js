@@ -98,6 +98,19 @@ exports.run = async function () {
   assert.strictEqual(deck.worktreeOf(agentTerm)?.path, b.path);
   console.log('✓ shell in main + claude running in feat-b → terminal listed under feat-b, marked as claude');
 
+  // Idle vs working: the sleeping fake agent is idle; a CPU-spinning one is working.
+  await deck.poll();
+  await sleep(1500);
+  await deck.poll();
+  assert.strictEqual(deck.procs.get(agentTerm)?.working, false);
+  console.log('✓ idle claude (waiting at prompt) → idle, no spinner');
+  const busyTerm = vscode.window.createTerminal({ name: 'busy', cwd: a.path });
+  busyTerm.sendText(`${process.env.AGENT_DECK_TEST_BIN}/claude 30 busy`);
+  await until(() => deck.procs.get(busyTerm)?.working === true, 'busy agent detected as working', 15000);
+  assert.strictEqual(deck.procs.get(agentTerm)?.working, false);
+  console.log('✓ busy claude → working (spinner); idle one stays idle');
+  busyTerm.dispose();
+
   // Staged vs unstaged changes, per worktree.
   const fsx = require('fs');
   fsx.writeFileSync(path.join(a.path, 'README.md'), 'changed\n');

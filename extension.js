@@ -11,6 +11,19 @@ const ENV_KEY = 'AGENT_DECK_WORKTREE';
 const GIT_SCHEME = 'agentdeck-git';
 const AGENTS = new Set(['claude', 'codex', 'cursor-agent', 'aider', 'gemini', 'opencode', 'amp', 'goose']);
 const POLL_MS = 4000;
+// An agent counts as working above this share of one core. Idle Claude sits at ~1–2%; while it
+// thinks or runs tools it keeps redrawing its spinner and is well above this.
+const WORKING_CPU = 0.04;
+/** @type {Map<number, { cpu: number, at: number }>} last CPU-time sample per agent pid */
+const cpuSamples = new Map();
+
+/** ps `time` (e.g. "1:02.34", "1:02:03.45", "2-01:02:03") to seconds. */
+function parseCpuTime(t) {
+  return t
+    .replace('-', ':')
+    .split(':')
+    .reduce((acc, part) => acc * 60 + Number(part), 0);
+}
 const COLORS = [
   'terminal.ansiCyan',
   'terminal.ansiMagenta',
@@ -30,7 +43,7 @@ const COLORS = [
 /** @typedef {{ commonDir: string, root: string, name: string, pinned: boolean, worktrees: Worktree[] }} Repo */
 /** @typedef {{ code: string, path: string, orig?: string }} Change  code is the two-letter porcelain XY */
 /** @typedef {{ changes: Change[], ahead: number, behind: number, upstream: string | undefined }} WtStatus */
-/** @typedef {{ wtPath: string | undefined, fromChild: boolean, agent: string | undefined }} ProcInfo */
+/** @typedef {{ wtPath: string | undefined, fromChild: boolean, agent: string | undefined, working: boolean }} ProcInfo */
 
 /** @typedef {{ kind: 'repo', id: string, repo: Repo }} RepoNode */
 /** @typedef {{ kind: 'worktree', id: string, wt: Worktree }} WorktreeNode */
@@ -150,11 +163,14 @@ async function scanTerminalProcesses(terminals, locate) {
   const kids = new Map();
   /** @type {Map<number, string>} */
   const comm = new Map();
-  for (const line of (await run('ps', ['-A', '-o', 'pid=,ppid=,comm='])).split('\n')) {
-    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
+  /** @type {Map<number, number>} */
+  const cpuTime = new Map();
+  for (const line of (await run('ps', ['-A', '-o', 'pid=,ppid=,time=,comm='])).split('\n')) {
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/);
     if (!m) continue;
     const pid = Number(m[1]), ppid = Number(m[2]);
-    comm.set(pid, path.basename(m[3].trim()));
+    comm.set(pid, path.basename(m[4].trim()));
+    cpuTime.set(pid, parseCpuTime(m[3]));
     if (!kids.has(ppid)) kids.set(ppid, []);
     kids.get(ppid).push(pid);
   }
@@ -201,7 +217,16 @@ async function scanTerminalProcesses(terminals, locate) {
         break;
       }
     }
-    result.set(t, { wtPath, fromChild, agent });
+    // Working = the agent process itself is burning CPU since the last sample. Its children are
+    // ignored on purpose: agents leave dev servers and watchers running in the background.
+    let working = false;
+    if (agentPid) {
+      const now = Date.now(), cpu = cpuTime.get(agentPid) ?? 0;
+      const prev = cpuSamples.get(agentPid);
+      if (prev && now > prev.at) working = (cpu - prev.cpu) / ((now - prev.at) / 1000) >= WORKING_CPU;
+      cpuSamples.set(agentPid, { cpu, at: now });
+    }
+    result.set(t, { wtPath, fromChild, agent, working });
   }
   return result;
 }
@@ -460,8 +485,20 @@ class Deck {
     return vscode.window.terminals.filter((t) => this.worktreeOf(t)?.path === wtPath);
   }
 
-  isRunning(t) {
-    return (this.busy.get(t) ?? 0) > 0 || !!this.procs.get(t)?.agent;
+  /** Agent in this terminal is actively thinking / running tools. */
+  isWorking(t) {
+    return !!this.procs.get(t)?.working;
+  }
+
+  /** Agent is open but idle, i.e. waiting for you. */
+  isIdleAgent(t) {
+    const p = this.procs.get(t);
+    return !!p?.agent && !p.working;
+  }
+
+  /** A non-agent command (dev server, tests, …) is running in the shell. */
+  isRunningCommand(t) {
+    return (this.busy.get(t) ?? 0) > 0 && !this.procs.get(t)?.agent;
   }
 
   displayName(t) {
@@ -677,16 +714,20 @@ class WorktreeTree {
         const st = deck.status.get(wt.path);
         const staged = deck.changesOf(wt.path, 'staged').length;
         const unstaged = deck.changesOf(wt.path, 'unstaged').length;
-        const running = terms.some((t) => deck.isRunning(t));
+        const working = terms.some((t) => deck.isWorking(t));
+        const idle = !working && terms.some((t) => deck.isIdleAgent(t));
         const isActive = deck.active === wt.path;
         const item = new vscode.TreeItem(wtLabel(wt), Collapsed);
         item.id = el.id;
         const color = new vscode.ThemeColor(hashColor(wt.path));
-        item.iconPath = running
-          ? new vscode.ThemeIcon('loading~spin', color)
-          : new vscode.ThemeIcon(isActive ? 'circle-filled' : wt.isMain ? 'repo' : 'git-branch', color);
+        item.iconPath = new vscode.ThemeIcon(
+          working ? 'loading~spin' : idle ? 'sparkle' : isActive ? 'circle-filled' : wt.isMain ? 'repo' : 'git-branch',
+          color,
+        );
 
         const bits = [];
+        if (working) bits.push('working');
+        else if (idle) bits.push('idle');
         if (st?.ahead) bits.push(`↑${st.ahead}`);
         if (st?.behind) bits.push(`↓${st.behind}`);
         if (staged) bits.push(`✓${staged}`);
@@ -743,13 +784,16 @@ class WorktreeTree {
       case 'terminal': {
         const t = el.terminal;
         const proc = deck.procs.get(t);
-        const running = deck.isRunning(t);
+        const cmdRunning = deck.isRunningCommand(t);
         const item = new vscode.TreeItem(deck.displayName(t), None);
         item.id = el.id;
         const color = new vscode.ThemeColor(hashColor(el.wtPath));
-        item.iconPath = new vscode.ThemeIcon(running ? 'loading~spin' : proc?.agent ? 'sparkle' : 'terminal', color);
-        const cmd = proc?.agent ?? (running ? lastCommand.get(t) : undefined);
-        item.description = [cmd ?? '', vscode.window.activeTerminal === t ? 'active' : ''].filter(Boolean).join(' · ');
+        item.iconPath = new vscode.ThemeIcon(
+          proc?.working ? 'loading~spin' : proc?.agent ? 'sparkle' : cmdRunning ? 'play-circle' : 'terminal',
+          color,
+        );
+        const what = proc?.agent ? `${proc.agent} · ${proc.working ? 'working' : 'idle'}` : cmdRunning ? lastCommand.get(t) : undefined;
+        item.description = [what ?? '', vscode.window.activeTerminal === t ? 'active' : ''].filter(Boolean).join(' · ');
         item.contextValue = 'terminal';
         item.command = { command: 'agentDeck.showTerminal', title: 'Show Terminal', arguments: [el] };
         return item;

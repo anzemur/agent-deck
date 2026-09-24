@@ -9,7 +9,19 @@ git -C "$TMP/repo" add README.md
 git -C "$TMP/repo" -c user.email=t@t -c user.name=t commit -q -m init
 # fake agent binary named `claude` (copies of system binaries get killed by code signing)
 mkdir -p "$TMP/bin"
-printf '#include <unistd.h>\n#include <stdlib.h>\nint main(int c, char **v) { sleep(c > 1 ? atoi(v[1]) : 60); return 0; }\n' | cc -x c - -o "$TMP/bin/claude"
+# `claude N` sleeps N seconds (idle agent); `claude N busy` spins the CPU for N seconds (working agent).
+cat > "$TMP/bin/claude.c" <<'C'
+#include <unistd.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+int main(int c, char **v) {
+  int n = c > 1 ? atoi(v[1]) : 60;
+  if (c > 2 && !strcmp(v[2], "busy")) { time_t end = time(0) + n; volatile unsigned long x = 0; while (time(0) < end) x++; return 0; }
+  sleep(n); return 0;
+}
+C
+cc "$TMP/bin/claude.c" -o "$TMP/bin/claude"
 export AGENT_DECK_TEST_BIN="$TMP/bin"
 git -C "$TMP/repo" worktree add -q -b feat-a "$TMP/wt/a"
 git -C "$TMP/repo" worktree add -q -b feat-b "$TMP/wt/b"
