@@ -583,7 +583,7 @@ class Deck {
     this.recordReady = false;
     /** @type {Map<vscode.Terminal, number>} when you last looked at each terminal */
     this.seenAt = new Map();
-    /** @type {Set<vscode.Terminal>} agents that worked (or asked something) since you last looked */
+    /** @type {Set<vscode.Terminal>} agents that did work since you last looked */
     this.workedSinceSeen = new Set();
     /** @type {Map<vscode.Terminal, string>} last alert sent per terminal, so each episode alerts once */
     this.alerted = new Map();
@@ -813,9 +813,11 @@ class Deck {
   trackAttention() {
     const looking = vscode.window.state.focused ? vscode.window.activeTerminal : undefined;
     for (const [t, p] of this.procs) {
-      if (p.status === 'busy' || p.status === 'waiting') this.workedSinceSeen.add(t);
+      // Only real work makes a later "done" worth telling you about; a question you already saw
+      // isn't news. ("waiting" is shown from the live status anyway.)
+      if (p.status === 'busy') this.workedSinceSeen.add(t);
       // Watching it happen counts as seeing it.
-      if (t === looking && p.status !== 'waiting') this.markSeen(t);
+      if (t === looking) this.markSeen(t);
       const a = this.attentionOf(t);
       if (!a) {
         this.alerted.delete(t);
