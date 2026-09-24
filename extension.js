@@ -43,7 +43,8 @@ const COLORS = [
 /** @typedef {{ commonDir: string, root: string, name: string, pinned: boolean, worktrees: Worktree[] }} Repo */
 /** @typedef {{ code: string, path: string, orig?: string }} Change  code is the two-letter porcelain XY */
 /** @typedef {{ changes: Change[], ahead: number, behind: number, upstream: string | undefined }} WtStatus */
-/** @typedef {{ wtPath: string | undefined, fromChild: boolean, agent: string | undefined, working: boolean }} ProcInfo */
+/** @typedef {{ wtPath: string | undefined, fromChild: boolean, agent: string | undefined, working: boolean, sessionId: string | undefined }} ProcInfo */
+/** @typedef {{ sessionId: string, wtPath: string, name: string }} AgentRecord  a Claude session to bring back after a restart */
 /** @typedef {{ title: string | undefined, prNumber: number | undefined, prUrl: string | undefined }} SessionInfo */
 
 /** @typedef {{ kind: 'repo', id: string, repo: Repo }} RepoNode */
@@ -218,18 +219,82 @@ async function scanTerminalProcesses(terminals, locate) {
         break;
       }
     }
-    // Working = the agent process itself is burning CPU since the last sample. Its children are
+    // Claude publishes its session id and busy/idle state per pid; prefer that. Otherwise:
+    // working = the agent process itself is burning CPU since the last sample. Its children are
     // ignored on purpose: agents leave dev servers and watchers running in the background.
     let working = false;
-    if (agentPid) {
+    const pidFile = agent === 'claude' && agentPid ? readClaudePidFile(agentPid) : undefined;
+    if (pidFile?.status) {
+      working = pidFile.status === 'busy';
+    } else if (agentPid) {
       const now = Date.now(), cpu = cpuTime.get(agentPid) ?? 0;
       const prev = cpuSamples.get(agentPid);
       if (prev && now > prev.at) working = (cpu - prev.cpu) / ((now - prev.at) / 1000) >= WORKING_CPU;
       cpuSamples.set(agentPid, { cpu, at: now });
     }
-    result.set(t, { wtPath, fromChild, agent, working });
+    result.set(t, { wtPath, fromChild, agent, working, sessionId: pidFile?.sessionId });
   }
   return result;
+}
+
+// ---------------------------------------------------------------- claude sessions
+
+const CLAUDE_SESSIONS = process.env.AGENT_DECK_CLAUDE_SESSIONS || path.join(os.homedir(), '.claude', 'sessions');
+
+/** Claude Code writes ~/.claude/sessions/<pid>.json while running: session id, cwd, busy/idle. */
+function readClaudePidFile(pid) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(CLAUDE_SESSIONS, `${pid}.json`), 'utf8'));
+  } catch {
+    return undefined;
+  }
+}
+
+/** Session ids of Claude processes alive right now, in any app. */
+function liveClaudeSessions() {
+  const live = new Set();
+  let names = [];
+  try {
+    names = fs.readdirSync(CLAUDE_SESSIONS);
+  } catch {}
+  for (const name of names) {
+    const m = name.match(/^(\d+)\.json$/);
+    if (!m) continue;
+    try {
+      process.kill(Number(m[1]), 0);
+    } catch {
+      continue; // stale file from a dead process
+    }
+    const info = readClaudePidFile(m[1]);
+    if (info?.sessionId) live.add(info.sessionId);
+  }
+  return live;
+}
+
+/**
+ * Where to run `claude --resume <id>`: resume looks the session up in the project of the current
+ * directory, so it must be the directory the transcript is stored under.
+ * @returns {string | undefined}
+ */
+function resumeDirFor(sessionId) {
+  let dirs = [];
+  try {
+    dirs = fs.readdirSync(CLAUDE_PROJECTS);
+  } catch {}
+  for (const d of dirs) {
+    const file = path.join(CLAUDE_PROJECTS, d, `${sessionId}.jsonl`);
+    if (!fs.existsSync(file)) continue;
+    const head = fs.readFileSync(file, 'utf8').slice(0, 2 * 1024 * 1024);
+    for (const m of head.matchAll(/"cwd":"((?:[^"\\]|\\.)*)"/g)) {
+      const cwd = JSON.parse(`"${m[1]}"`);
+      if (cwd.replace(/[^a-zA-Z0-9]/g, '-') === d) return cwd;
+    }
+  }
+  return undefined;
+}
+
+function shellQuote(s) {
+  return /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 // ---------------------------------------------------------------- claude session titles
@@ -391,6 +456,8 @@ class Deck {
     this.pendingRefresh = false;
     this.polling = false;
     this.lastPollSig = '';
+    this.recordReady = false;
+    this.lastRecordJson = '';
 
     this._onChange = new vscode.EventEmitter();
     this.onChange = this._onChange.event;
@@ -488,6 +555,7 @@ class Deck {
         Promise.all(this.worktrees.map(async (w) => /** @type {const} */ ([w.path, await readStatus(w.path)]))),
       ]);
       this.procs = procs;
+      this.recordAgents();
       this.status = new Map(statuses.filter(([, s]) => s).map(([p, s]) => [p, /** @type {WtStatus} */ (s)]));
       this.sessions = new Map();
       for (const w of this.worktrees) {
@@ -506,6 +574,98 @@ class Deck {
       }
     } finally {
       this.polling = false;
+    }
+  }
+
+  // ------------------------------------------------------------ resume after restart
+
+  /** One record list per window, keyed by its folders, so two windows never resume each other's agents. */
+  get recordKey() {
+    return (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath).sort().join('|') || 'no-folder';
+  }
+
+  get recordFile() {
+    return path.join(this.ctx.globalStorageUri.fsPath, 'agents.json');
+  }
+
+  readRecords() {
+    try {
+      return JSON.parse(fs.readFileSync(this.recordFile, 'utf8'));
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * Remembers which Claude sessions are running in this window's terminals. Quitting the app kills
+   * them without warning, so this runs on every poll; whatever was last written is what we resume.
+   */
+  recordAgents() {
+    if (!this.recordReady) return; // don't clobber the list before startup resume has read it
+    /** @type {AgentRecord[]} */
+    const list = [];
+    for (const [t, p] of this.procs) {
+      const wt = this.worktreeOf(t);
+      if (p.sessionId && wt) list.push({ sessionId: p.sessionId, wtPath: wt.path, name: this.displayName(t) });
+    }
+    const json = JSON.stringify(list);
+    if (json === this.lastRecordJson) return;
+    this.lastRecordJson = json;
+    const all = this.readRecords();
+    all[this.recordKey] = list;
+    try {
+      fs.mkdirSync(path.dirname(this.recordFile), { recursive: true });
+      fs.writeFileSync(this.recordFile, JSON.stringify(all, null, 1));
+    } catch (e) {
+      console.error('[agent-deck] could not save agents', e);
+    }
+  }
+
+  /**
+   * After a restart: run `claude --resume` for every recorded session that is no longer alive.
+   * Terminals restored by the editor are empty shells at that point, so they are reused first.
+   * @returns {Promise<number>} how many sessions were resumed
+   */
+  async resumeAgents() {
+    try {
+      const cfg = vscode.workspace.getConfiguration('agentDeck');
+      if (!cfg.get('resumeOnStartup', true)) return 0;
+      /** @type {AgentRecord[]} */
+      const records = this.readRecords()[this.recordKey] ?? [];
+      const live = liveClaudeSessions();
+      const running = new Set([...this.procs.values()].map((p) => p.sessionId).filter(Boolean));
+      const todo = records.filter((r) => !live.has(r.sessionId) && !running.has(r.sessionId) && this.findWorktree(r.wtPath));
+      if (!todo.length) return 0;
+
+      const startup = /** @type {string} */ (cfg.get('startupCommand') ?? '').trim();
+      const base = startup.startsWith('claude') || startup.includes('/claude') ? startup : 'claude';
+      // Restored terminals with nothing running in them.
+      const spare = vscode.window.terminals.filter((t) => {
+        const p = this.procs.get(t);
+        return p && !p.agent && !this.isRunningCommand(t) && t.exitStatus === undefined;
+      });
+
+      let resumed = 0;
+      for (const r of todo) {
+        const wt = /** @type {Worktree} */ (this.findWorktree(r.wtPath));
+        const dir = resumeDirFor(r.sessionId);
+        if (!dir) continue; // transcript gone
+        const command = `${base} --resume ${r.sessionId}`;
+        const pick = spare.findIndex((t) => t.name === r.name);
+        const reuse = spare.splice(pick >= 0 ? pick : 0, spare.length ? 1 : 0)[0];
+        if (reuse) {
+          reuse.sendText(`cd ${shellQuote(dir)} && ${command}`, true);
+          this.links.set(reuse, wt.path);
+          this.names.set(reuse, reuse.name);
+        } else {
+          this.createTerminal(wt, { show: false, name: r.name, command, cwd: dir });
+        }
+        resumed++;
+      }
+      this.saveLinks();
+      return resumed;
+    } finally {
+      this.recordReady = true;
     }
   }
 
@@ -601,9 +761,10 @@ class Deck {
   }
 
   /** @param {Worktree} wt */
-  createTerminal(wt, { show = true, preserveFocus = false } = {}) {
+  /** `command` replaces the startup command; `cwd` overrides where the shell starts. */
+  createTerminal(wt, { show = true, preserveFocus = false, name: wanted = undefined, command = undefined, cwd = undefined } = {}) {
     const cfg = vscode.workspace.getConfiguration('agentDeck');
-    const base = wtLabel(wt);
+    const base = wanted ?? wtLabel(wt);
     const existing = this.terminalsOf(wt.path);
     const taken = new Set(existing.map((t) => this.displayName(t)));
     let name = base;
@@ -611,7 +772,7 @@ class Deck {
 
     const terminal = vscode.window.createTerminal({
       name,
-      cwd: wt.path,
+      cwd: cwd ?? wt.path,
       iconPath: new vscode.ThemeIcon(wt.isMain ? 'repo' : 'git-branch'),
       color: new vscode.ThemeColor(hashColor(wt.path)),
       env: { [ENV_KEY]: wt.path },
@@ -624,7 +785,8 @@ class Deck {
 
     // Only the first terminal of a worktree starts the agent; extra ones are plain shells.
     const startup = /** @type {string} */ (cfg.get('startupCommand') ?? '').trim();
-    if (startup && !existing.length) terminal.sendText(startup, true);
+    if (command) terminal.sendText(command, true);
+    else if (startup && !existing.length) terminal.sendText(startup, true);
     if (show) terminal.show(preserveFocus);
     this._onChange.fire();
     return terminal;
@@ -1371,9 +1533,17 @@ function activate(ctx) {
     }),
   );
 
-  deck.refresh().then(() => {
+  deck.refresh().then(async () => {
     updateChrome();
     syncFromTerminal(vscode.window.activeTerminal);
+    // Restored terminals need a moment before their shells report a pid.
+    await new Promise((r) => setTimeout(r, 1500));
+    await deck.poll(true);
+    const n = await deck.resumeAgents();
+    if (n) {
+      vscode.window.showInformationMessage(`Agent Deck: resumed ${n} Claude session${n === 1 ? '' : 's'} from before the restart.`);
+      setTimeout(() => deck.poll(), 3000);
+    }
   });
 
   return { deck, tree };

@@ -432,6 +432,11 @@
             "Always the branch name"
           ],
           "description": "What to show as each worktree's name."
+        },
+        "agentDeck.resumeOnStartup": {
+          "type": "boolean",
+          "default": true,
+          "description": "When the editor starts, resume (claude --resume) every Claude session that was running in this window's terminals when it last closed."
         }
       }
     }
