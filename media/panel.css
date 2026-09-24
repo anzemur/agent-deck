@@ -72,8 +72,8 @@ body.vscode-light .seti, body.vscode-high-contrast-light .seti { color: var(--fc
 .wt .actions { margin-top: -2px; }
 .wt.active { background: var(--active-bg); }
 .wt.active .title, .wt.active .badge { color: var(--c); }
+/* Every worktree's icon wears its colour, the same one as its terminal tab. */
 .wt .state { color: var(--c); }
-.wt .state.plain { color: var(--muted); }
 
 /* body of the open worktree: a thin guide in the worktree's colour */
 .body { position: relative; padding-bottom: 6px; }
