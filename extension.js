@@ -461,7 +461,9 @@ function wtLabel(wt) {
 /** Tree label: what the agent is working on, when we know it and the user wants it. */
 function wtTitle(wt, deck) {
   const mode = vscode.workspace.getConfiguration('agentDeck').get('worktreeLabel');
-  return (mode !== 'branch' && deck.sessions.get(wt.path)?.title) || wtLabel(wt);
+  if (mode === 'branch') return wtLabel(wt);
+  // Claude's title once it has one; until then the task you typed (for worktrees made by New Task).
+  return deck.sessions.get(wt.path)?.title || deck.taskTitles.get(wt.path) || wtLabel(wt);
 }
 
 /** "now", "4m", "2h", "3d". */
@@ -546,6 +548,93 @@ function searchRootFor(wt, folders) {
   return link;
 }
 
+// ---------------------------------------------------------------- new task helpers
+
+const STOPWORDS = new Set(
+  'a an the to for of in on at by and or with from into please can could you we i should would make let lets just so that this these those it its be is are was were do does'.split(' '),
+);
+
+/** "Fix the flaky login redirect test!" → "flaky-login-redirect-test" (at most 5 words, 40 chars). */
+function slugify(text) {
+  const words = text.toLowerCase().replace(/[^a-z0-9\s-]/g, ' ').split(/[\s-]+/).filter(Boolean);
+  // A leading "fix"/"refactor"/… becomes the branch type, so it isn't repeated in the slug.
+  if (words.length > 1 && BRANCH_TYPES[words[0]]) words.shift();
+  const kept = words.filter((w) => !STOPWORDS.has(w));
+  return (kept.length ? kept : words).slice(0, 5).join('-').slice(0, 40).replace(/-+$/, '') || 'task';
+}
+
+/** Leading verb → branch type, the way people name branches. */
+const BRANCH_TYPES = /** @type {Record<string, string>} */ ({
+  fix: 'fix', bug: 'fix', bugfix: 'fix', hotfix: 'fix', repair: 'fix',
+  refactor: 'refactor', cleanup: 'refactor', rename: 'refactor', simplify: 'refactor',
+  perf: 'perf', speed: 'perf', optimize: 'perf', optimise: 'perf',
+  test: 'test', tests: 'test', docs: 'docs', document: 'docs', chore: 'chore', bump: 'chore', upgrade: 'chore',
+});
+function branchType(text) {
+  const words = text.toLowerCase().match(/[a-z]+/g) ?? [];
+  for (const w of words.slice(0, 4)) if (BRANCH_TYPES[w]) return BRANCH_TYPES[w];
+  return 'feat';
+}
+
+/**
+ * Suggested branch for a task, following how this repo's recent branches are named
+ * (e.g. "anze/fix/…" → "anze/{type}/{slug}", "feat/…" → "{type}/{slug}").
+ */
+async function suggestBranch(repo, text) {
+  const out = await git(repo.root, ['for-each-ref', '--sort=-committerdate', '--count=30', '--format=%(refname:short)', 'refs/heads']).catch(() => '');
+  const types = new Set(Object.values(BRANCH_TYPES).concat('feat'));
+  const patterns = new Map();
+  for (const b of out.split('\n').filter(Boolean)) {
+    const parts = b.split('/');
+    let pat;
+    if (parts.length >= 3 && types.has(parts[1])) pat = `${parts[0]}/{type}/{slug}`;
+    else if (parts.length >= 2 && types.has(parts[0])) pat = '{type}/{slug}';
+    if (pat) patterns.set(pat, (patterns.get(pat) ?? 0) + 1);
+  }
+  const setting = /** @type {string} */ (vscode.workspace.getConfiguration('agentDeck').get('branchTemplate') ?? '').trim();
+  const best = [...patterns].sort((x, y) => y[1] - x[1])[0]?.[0];
+  const template = setting || best || '{slug}';
+  const base = template.replace('{type}', branchType(text)).replace('{slug}', slugify(text));
+  // Don't collide with an existing branch.
+  for (let i = 1; ; i++) {
+    const name = i === 1 ? base : `${base}-${i}`;
+    const taken = await git(repo.root, ['show-ref', '--verify', '--quiet', `refs/heads/${name}`]).then(() => true, () => false);
+    if (!taken) return name;
+  }
+}
+
+/**
+ * Commands that make a fresh worktree usable. Uses the repo's own setup script when it has one
+ * (.agent-deck/config.json, or Superset's .superset/config.json — same format: { "setup": [...] }),
+ * otherwise copies the main checkout's ignored .env files and installs dependencies.
+ * @returns {Promise<{ commands: string[], source: string }>}
+ */
+async function setupFor(repo) {
+  for (const rel of ['.agent-deck/config.json', '.superset/config.json']) {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(path.join(repo.root, rel), 'utf8'));
+      if (Array.isArray(cfg.setup)) return { commands: cfg.setup.map(String), source: rel };
+    } catch {}
+  }
+  const commands = [];
+  const ignored = await git(repo.root, ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory']).catch(() => '');
+  for (const f of ignored.split('\n').filter((l) => /(^|\/)\.env(\.[^/]+)?$/.test(l))) {
+    const dir = path.dirname(f);
+    commands.push(`${dir === '.' ? '' : `mkdir -p ${sq(dir)} && `}cp "$AGENT_DECK_ROOT_PATH"/${sq(f)} ${sq(f)}`);
+  }
+  const has = (f) => fs.existsSync(path.join(repo.root, f));
+  if (has('bun.lock') || has('bun.lockb')) commands.push('bun install');
+  else if (has('pnpm-lock.yaml')) commands.push('pnpm install');
+  else if (has('yarn.lock')) commands.push('yarn install');
+  else if (has('package-lock.json')) commands.push('npm install');
+  return { commands, source: 'auto' };
+}
+
+/** Single-quote for POSIX shells. */
+function sq(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
 /** Every file git knows about in a worktree: tracked plus untracked-but-not-ignored. */
 async function listWorktreeFiles(wtPath) {
   const out = await git(wtPath, ['ls-files', '--cached', '--others', '--exclude-standard', '-z']).catch(() => '');
@@ -574,6 +663,8 @@ class Deck {
     this.status = new Map();
     /** @type {Map<string, SessionInfo>} worktree path -> latest Claude session title / PR */
     this.sessions = new Map();
+    /** @type {Map<string, string>} worktree path -> the task typed into New Task */
+    this.taskTitles = new Map(ctx.workspaceState.get('agentDeck.taskTitles', []));
     /** @type {Map<string, PullRequest[]>} worktree path -> related pull requests */
     this.prs = new Map();
     this.prsLoading = false;
@@ -1029,7 +1120,7 @@ class Deck {
 
   /** @param {Worktree} wt */
   /** `command` replaces the startup command; `cwd` overrides where the shell starts. */
-  createTerminal(wt, { show = true, preserveFocus = false, name: wanted = undefined, command = undefined, cwd = undefined, plain = false } = {}) {
+  createTerminal(wt, { show = true, preserveFocus = false, name: wanted = undefined, command = undefined, cwd = undefined, plain = false, env = {} } = {}) {
     const cfg = vscode.workspace.getConfiguration('agentDeck');
     const base = wanted ?? wtLabel(wt);
     const existing = this.terminalsOf(wt.path);
@@ -1042,7 +1133,7 @@ class Deck {
       cwd: cwd ?? wt.path,
       iconPath: new vscode.ThemeIcon(wt.isMain ? 'repo' : 'git-branch'),
       color: new vscode.ThemeColor(hashColor(wt.path)),
-      env: { [ENV_KEY]: wt.path },
+      env: { ...env, [ENV_KEY]: wt.path },
       location: cfg.get('terminalLocation') === 'editor' ? vscode.TerminalLocation.Editor : vscode.TerminalLocation.Panel,
     });
     this.links.set(terminal, wt.path);
@@ -1520,6 +1611,53 @@ function activate(ctx) {
   /** @type {vscode.QuickPick<any> | undefined} */
   let lastPicker;
 
+  // ---- worktree creation (shared by New Worktree and New Task) ----------------------------------
+
+  const validateBranch = (v) =>
+    /^[\w.\-/]+$/.test(v.trim()) && !v.includes('..') && !v.trim().endsWith('/') ? undefined : 'Letters, digits, . - _ / only';
+
+  /** Where new branches start: agentDeck.baseBranch, else the remote's default branch, else HEAD. */
+  const baseRefFor = async (repo) => {
+    const setting = /** @type {string} */ (vscode.workspace.getConfiguration('agentDeck').get('baseBranch') ?? '').trim();
+    if (setting) return { ref: setting, remote: setting.includes('/') ? setting : undefined };
+    const head = (await git(repo.root, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']).catch(() => '')).trim();
+    return head ? { ref: head, remote: head } : { ref: 'HEAD', remote: undefined };
+  };
+  const baseRefLabel = async (repo) => {
+    const b = await baseRefFor(repo);
+    return b.ref === 'HEAD' ? "the main checkout's HEAD" : b.ref;
+  };
+
+  /**
+   * Creates (or checks out) `branch` as a new worktree next to the repo and returns it.
+   * `fresh`: fetch the base first so the task starts from the latest remote default branch.
+   */
+  const createWorktree = async (repo, branch, { fresh = false } = {}) => {
+    const setting = /** @type {string} */ (vscode.workspace.getConfiguration('agentDeck').get('worktreeParentDir') ?? '').trim();
+    const parent = setting ? expandHome(setting) : path.join(path.dirname(repo.root), `${repo.name}.worktrees`);
+    let target = path.join(parent, branch.split('/').pop() || branch.replace(/\//g, '-'));
+    for (let i = 2; fs.existsSync(target); i++) target = `${target.replace(/-\d+$/, '')}-${i}`;
+    const exists = await git(repo.root, ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).then(() => true, () => false);
+    const base = await baseRefFor(repo);
+    try {
+      fs.mkdirSync(parent, { recursive: true });
+      await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Creating worktree ${branch}…` }, async (p) => {
+        if (fresh && !exists && base.remote) {
+          p.report({ message: `fetching ${base.remote}` });
+          const [remote, ...rest] = base.remote.split('/');
+          await git(repo.root, ['fetch', '--quiet', remote, rest.join('/')]).catch(() => {}); // offline is fine
+        }
+        p.report({ message: 'adding worktree' });
+        await git(repo.root, exists ? ['worktree', 'add', target, branch] : ['worktree', 'add', '--no-track', '-b', branch, target, base.ref]);
+      });
+    } catch (e) {
+      vscode.window.showErrorMessage(`Agent Deck: ${e.message}`);
+      return undefined;
+    }
+    await deck.refresh();
+    return deck.findWorktree(target) ?? deck.worktrees.find((w) => w.branch === branch);
+  };
+
   /** Jump to a terminal that needs you: its worktree becomes active and the terminal is focused. */
   const goTo = (t) => {
     const wt = deck.worktreeOf(t);
@@ -1711,7 +1849,7 @@ function activate(ctx) {
       const tab = vscode.window.tabGroups.all.flatMap((g) => g.tabs).find((t) => t.input instanceof vscode.TabInputText && t.input.uri.toString() === uri.toString());
       const opened = await vscode.window.showTextDocument(vscode.Uri.file(real), { selection, viewColumn: ed.viewColumn, preview: tab?.isPreview });
       opened.revealRange(selection, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
-      if (tab && !ed.document.isDirty) await vscode.window.tabGroups.close(tab);
+      if (tab && !ed.document.isDirty) await Promise.resolve(vscode.window.tabGroups.close(tab)).catch(() => {}); // may already be gone
     }),
     vscode.commands.registerCommand('agentDeck.refreshTerminals', async () => {
       const { plan, skipped } = await deck.refreshTerminals();
@@ -1828,39 +1966,63 @@ function activate(ctx) {
       const repo = (arg?.wtPath && deck.findWorktree(arg.wtPath)?.repo) ?? (await pickRepo());
       if (!repo) return;
       const branch = await vscode.window.showInputBox({
-        prompt: `New worktree in ${repo.name}: branch name (existing branches are checked out, new ones branch off the main checkout's HEAD)`,
+        prompt: `New worktree in ${repo.name}: branch name (existing branches are checked out, new ones start from ${await baseRefLabel(repo)})`,
         placeHolder: 'feat/my-agent-task',
-        validateInput: (v) => (/^[\w.\-/]+$/.test(v.trim()) && !v.includes('..') ? undefined : 'Letters, digits, . - _ / only'),
+        validateInput: validateBranch,
       });
       if (!branch) return;
-      const name = branch.trim();
-      const setting = /** @type {string} */ (vscode.workspace.getConfiguration('agentDeck').get('worktreeParentDir') ?? '').trim();
-      const parent = setting ? expandHome(setting) : path.join(path.dirname(repo.root), `${repo.name}.worktrees`);
-      const target = path.join(parent, name.replace(/\//g, '-'));
-      if (fs.existsSync(target)) {
-        vscode.window.showErrorMessage(`Agent Deck: ${target} already exists.`);
-        return;
-      }
+      const wt = await createWorktree(repo, branch.trim());
+      if (wt) deck.switchTo(wt.path);
+    }),
 
-      let exists = false;
-      try {
-        await git(repo.root, ['show-ref', '--verify', '--quiet', `refs/heads/${name}`]);
-        exists = true;
-      } catch {}
-
-      try {
-        fs.mkdirSync(parent, { recursive: true });
-        await vscode.window.withProgress(
-          { location: vscode.ProgressLocation.Notification, title: `Creating worktree ${name}…` },
-          () => git(repo.root, exists ? ['worktree', 'add', target, name] : ['worktree', 'add', '-b', name, target, 'HEAD']),
-        );
-      } catch (e) {
-        vscode.window.showErrorMessage(`Agent Deck: ${e.message}`);
-        return;
+    vscode.commands.registerCommand('agentDeck.newTask', async (arg) => {
+      // arg lets tests (and keybindings) skip the prompts: { prompt, branch }.
+      const repo = (arg?.wtPath && deck.findWorktree(arg.wtPath)?.repo) ?? (await pickRepo());
+      if (!repo) return;
+      const task = arg?.prompt ?? (await vscode.window.showInputBox({
+        title: `New task · ${repo.name}`,
+        prompt: 'What should the agent do? It gets its own worktree, set up and ready, with Claude started on this.',
+        placeHolder: 'Fix the flaky login redirect test',
+        ignoreFocusOut: true,
+      }));
+      if (!task?.trim()) return;
+      const suggested = await suggestBranch(repo, task);
+      // Called with a prompt (tests, other extensions): take the suggested branch without asking.
+      let branch = arg?.branch ?? (arg?.prompt ? suggested : undefined);
+      if (!branch) {
+        const slugAt = suggested.lastIndexOf('/') + 1;
+        branch = await vscode.window.showInputBox({
+          title: `New task · branch`,
+          prompt: `Starts from ${await baseRefLabel(repo)}. Enter to accept.`,
+          value: suggested,
+          valueSelection: [slugAt, suggested.length],
+          validateInput: validateBranch,
+          ignoreFocusOut: true,
+        });
       }
-      await deck.refresh();
-      const created = deck.findWorktree(target) ?? deck.worktrees.find((w) => w.branch === name);
-      if (created) deck.switchTo(created.path);
+      if (!branch?.trim()) return;
+      const wt = await createWorktree(repo, branch.trim(), { fresh: true });
+      if (!wt) return;
+
+      deck.taskTitles.set(wt.path, task.trim().replace(/\s+/g, ' ').slice(0, 80));
+      ctx.workspaceState.update('agentDeck.taskTitles', [...deck.taskTitles]);
+
+      const { commands, source } = await setupFor(repo);
+      const cfg = vscode.workspace.getConfiguration('agentDeck');
+      const startup = /** @type {string} */ (cfg.get('startupCommand') ?? '').trim();
+      const agent = startup.startsWith('claude') || startup.includes('/claude') ? startup : 'claude';
+      // Setup failures shouldn't stop the agent: it can often fix them itself.
+      const setup = commands.length ? `{ ${commands.join(' && ')}; } ; ` : '';
+      deck.setActive(wt.path);
+      deck.createTerminal(wt, {
+        command: `${setup}${agent} ${sq(task.trim())}`,
+        plain: true,
+        env: { AGENT_DECK_ROOT_PATH: repo.root, SUPERSET_ROOT_PATH: repo.root },
+      });
+      if (!arg?.prompt) {
+        vscode.window.setStatusBarMessage(`Agent Deck: ${wtLabel(wt)} created${commands.length ? `, setup from ${source}` : ''}, Claude started`, 6000);
+      }
+      return wt.path;
     }),
 
     vscode.commands.registerCommand('agentDeck.removeWorktree', async (arg) => {

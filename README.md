@@ -13,6 +13,7 @@ Worktrees and terminals, linked, for running many coding agents at once in VS Co
 - **Survives restarts:** every running Claude session is remembered per window. Quit Cursor and on the next start each one is `claude --resume`d in its worktree (reusing the dead restored terminals). Turn off with `agentDeck.resumeOnStartup`.
 - **Refresh Terminals** (`…` menu on Worktrees, or the command palette): replaces old terminals with fresh ones: idle Claude sessions are `claude --resume`d, empty shells reopened, busy ones left alone. Clears the ⚠ "relaunch" markers (the Claude Code extension picks a new port every window load) and gives old terminals their worktree colour.
 - Terminals and worktrees share a colour. Spinner = agent is working (thinking / running tools); ✳ = agent is open but idle, waiting for you; ▶ = a plain command (dev server, tests) is running.
+- **New Task** (✨ on the Worktrees header, `⌘⌥T`): type what the agent should do. Agent Deck names a branch after it (following your repo's pattern, e.g. `anze/fix/flaky-login-redirect-test`), creates a worktree from the latest remote default branch, runs setup (your `.agent-deck/config.json` or `.superset/config.json` `setup` list, else copies ignored `.env*` files and runs `bun`/`pnpm`/`yarn`/`npm install`), and starts `claude "<task>"` in it. The card shows the task until Claude titles the session.
 - `+` creates a branch + worktree (in `<repo>.worktrees/` next to the repo) and opens a terminal in it. Right-click to delete.
 
 ## Settings
@@ -23,11 +24,13 @@ Worktrees and terminals, linked, for running many coding agents at once in VS Co
 | `agentDeck.startupCommand` | `claude` | run in the first terminal of a worktree (extra terminals are plain shells); empty = never |
 | `agentDeck.showOnStartup` | `true` | open the Agent Deck sidebar when the window opens or reloads |
 | `agentDeck.worktreeLabel` | `title` | `title` = Claude session title, `branch` = branch name |
+| `agentDeck.baseBranch` | `""` | where new branches start; empty = remote default branch (e.g. origin/staging) |
+| `agentDeck.branchTemplate` | `""` | New Task branch name, e.g. `anze/{type}/{slug}`; empty = follow the repo's recent branches |
 | `agentDeck.worktreeParentDir` | `""` | where new worktrees go |
 
 ## Keys
 
-`⌘P` go to a file in the active worktree, recent files first (`>`, `@`, `#`, `:` hand over to the regular ⌘P; off: `agentDeck.scopeQuickOpen`) · `⌘⇧F` search only the active worktree (off: `agentDeck.scopeSearch`) · `⌘⌥N` go to the agent that needs you · `⌘⌥W` quick switch · `⌘⌥↓` / `⌘⌥↑` next / previous worktree
+`⌘P` go to a file in the active worktree, recent files first (`>`, `@`, `#`, `:` hand over to the regular ⌘P; off: `agentDeck.scopeQuickOpen`) · `⌘⇧F` search only the active worktree (off: `agentDeck.scopeSearch`) · `⌘⌥T` new task · `⌘⌥N` go to the agent that needs you · `⌘⌥W` quick switch · `⌘⌥↓` / `⌘⌥↑` next / previous worktree
 
 ## Develop
 

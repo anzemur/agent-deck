@@ -378,5 +378,31 @@ exports.run = async function () {
     await vscode.commands.executeCommand('workbench.action.closeQuickOpen');
     console.log('✓ typing ">" hands over to the regular ⌘P / command palette');
   }
+
+  // New Task: prompt → branch → fresh worktree → setup (.env copied) → Claude started on the prompt.
+  {
+    const fsx = require('fs');
+    fsx.appendFileSync(path.join(main.path, '.gitignore'), '.env\n');
+    fsx.writeFileSync(path.join(main.path, '.env'), 'SECRET=1\n');
+    const created = await vscode.commands.executeCommand('agentDeck.newTask', { prompt: 'Fix the flaky login redirect test!' });
+    const wt = deck.findWorktree(created);
+    assert.ok(wt, `worktree created: ${created}`);
+    assert.strictEqual(wt.branch, 'flaky-login-redirect-test');
+    assert.strictEqual(path.basename(path.dirname(created)), `${path.basename(main.path)}.worktrees`);
+    assert.strictEqual(deck.active, created);
+    await until(() => fsx.existsSync(path.join(created, '.env')), '.env copied by setup', 15000);
+    await until(() => require('child_process').spawnSync('pgrep', ['-f', 'claude 120 Fix the flaky login redirect test!']).stdout.toString().trim(), 'claude started with the prompt', 15000);
+    assert.strictEqual(wtModel(wt).title, 'Fix the flaky login redirect test!');
+    console.log(`✓ New Task: branch "${wt.branch}", worktree in ${path.basename(path.dirname(created))}/, .env copied, claude started with the prompt, card titled by the task`);
+
+    // A repo setup script (.superset/config.json format) wins over the automatic setup.
+    fsx.mkdirSync(path.join(main.path, '.superset'), { recursive: true });
+    fsx.writeFileSync(path.join(main.path, '.superset/config.json'), JSON.stringify({ setup: ['cp "$SUPERSET_ROOT_PATH/.env" .env.from-script'] }));
+    const second = await vscode.commands.executeCommand('agentDeck.newTask', { prompt: 'Fix the flaky login redirect test!' });
+    assert.strictEqual(deck.findWorktree(second)?.branch, 'flaky-login-redirect-test-2');
+    await until(() => fsx.existsSync(path.join(second, '.env.from-script')), 'repo setup script ran', 15000);
+    assert.ok(!fsx.existsSync(path.join(second, '.env')), 'automatic setup did not run');
+    console.log('✓ New Task uses the repo\'s .superset/config.json setup when present; branch names never collide (…-2)');
+  }
   console.log('ALL PASSED');
 };

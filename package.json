@@ -45,6 +45,12 @@
     },
     "commands": [
       {
+        "command": "agentDeck.newTask",
+        "title": "New Task\u2026",
+        "icon": "$(sparkle)",
+        "category": "Agent Deck"
+      },
+      {
         "command": "agentDeck.refresh",
         "title": "Refresh",
         "icon": "$(refresh)",
@@ -208,6 +214,11 @@
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "agentDeck.newTask",
+          "when": "view == agentDeck.worktrees",
+          "group": "navigation@0"
+        },
         {
           "command": "agentDeck.newWorktree",
           "when": "view == agentDeck.worktrees",
@@ -408,6 +419,11 @@
         "key": "cmd+p",
         "mac": "cmd+p",
         "when": "config.agentDeck.scopeQuickOpen && !inQuickOpen"
+      },
+      {
+        "command": "agentDeck.newTask",
+        "key": "cmd+alt+t",
+        "mac": "cmd+alt+t"
       }
     ],
     "configuration": {
@@ -474,6 +490,16 @@
           "type": "boolean",
           "default": true,
           "description": "\u2318P lists only the active worktree's files (typing >, @, # or : hands over to the regular Quick Open). In the main checkout \u2318P is the normal one. Turn off to always get the regular \u2318P."
+        },
+        "agentDeck.baseBranch": {
+          "type": "string",
+          "default": "",
+          "description": "Branch new worktrees start from, e.g. origin/main. Empty = the remote's default branch (fetched first for New Task), or the main checkout's HEAD if there's no remote."
+        },
+        "agentDeck.branchTemplate": {
+          "type": "string",
+          "default": "",
+          "description": "Branch name for New Task, with {type} (feat, fix, refactor, \u2026) and {slug} (from the task). Empty = follow how this repo's recent branches are named, e.g. \"anze/{type}/{slug}\"."
         }
       }
     }
