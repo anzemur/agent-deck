@@ -108,7 +108,7 @@
       <span class="badge">${esc(w.badge)}</span>
     </div>`;
     const body = open ? `<div class="body">${w.sections.map((s) => renderSection(w, s)).join('')}</div>` : '';
-    return `<div class="card" style="--c:${w.colorVar}">${head}${body}</div>`;
+    return `<div class="card ${open ? 'open' : ''}" style="--c:${w.colorVar}">${head}${body}</div>`;
   }
 
   function render() {

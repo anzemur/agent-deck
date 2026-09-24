@@ -75,13 +75,23 @@ body.vscode-light .seti, body.vscode-high-contrast-light .seti { color: var(--fc
 /* Every worktree's icon wears its colour, the same one as its terminal tab. */
 .wt .state { color: var(--c); }
 
-/* body of the open worktree: a thin guide in the worktree's colour */
-.body { position: relative; padding-bottom: 6px; }
-.body::before {
-  content: ''; position: absolute; left: 15px; top: 0; bottom: 8px; width: 1px;
-  background: var(--c); opacity: 0.45;
+/* The open worktree reads as one block: a light tint of its colour behind header and contents,
+   a solid bar down the left edge, and a rule where it ends. */
+.card.open {
+  background: color-mix(in srgb, var(--c) 7%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--c) 35%, transparent);
+  margin-bottom: 4px;
 }
+.card { position: relative; }
+/* Drawn above the rows so the header's own highlight can't cover it. */
+.card.open::before {
+  content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
+  background: var(--c); z-index: 1; pointer-events: none;
+}
+.card.open .wt.active { background: color-mix(in srgb, var(--c) 10%, var(--active-bg)); }
+.body { padding-bottom: 8px; }
 .body .row { padding-left: calc(8px + var(--indent)); }
+.body .row:hover { background: color-mix(in srgb, var(--c) 10%, var(--hover)); }
 
 .sec {
   display: flex; align-items: center; gap: 6px;
