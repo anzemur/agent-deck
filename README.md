@@ -4,8 +4,8 @@ Worktrees and terminals, linked, for running many coding agents at once in VS Co
 
 - **Worktrees view** (activity bar → Agent Deck): every git worktree of every repo in the window.
 - Worktrees are named after **what the agent is doing**: the Claude session title (your `/rename` wins), with the branch and PR number next to it. Set `agentDeck.worktreeLabel` to `branch` to turn this off.
-- **Click a worktree** → the dropdown opens/closes and its linked terminal comes to the front (nothing is created; use *New terminal*).
-- Each worktree's dropdown has **Terminals** (linked terminals, click to focus) and **Changes** (Staged / Unstaged files — click for a side-by-side diff, `+`/`−` to stage/unstage a file or the whole group).
+- **Click a worktree** → it opens (and every other worktree closes) and its linked terminal comes to the front (nothing is created; use *New terminal*).
+- Each worktree's dropdown shows **Staged Changes** and **Changes** first (click a file for a side-by-side diff, `+`/`−` to stage/unstage a file or a whole group), then its **Terminals**.
 - **Focus a terminal** (tab, panel, `⌘⌥↑/↓`) → the worktree view selects its worktree and the **Files** view switches to that worktree's files.
 - Terminals are linked by what's running in them: a `claude -w` session whose shell sits in the main checkout still shows under the worktree the agent is working in.
 - **Survives restarts:** every running Claude session is remembered per window. Quit Cursor and on the next start each one is `claude --resume`d in its worktree (reusing the dead restored terminals). Turn off with `agentDeck.resumeOnStartup`.

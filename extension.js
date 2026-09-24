@@ -55,7 +55,8 @@ const COLORS = [
 /** @typedef {{ kind: 'change', id: string, wt: Worktree, group: Group, change: Change }} ChangeNode */
 /** @typedef {{ kind: 'section', id: string, wt: Worktree, section: 'terminals' | 'changes' }} SectionNode */
 /** @typedef {{ kind: 'newTerminal', id: string, wt: Worktree }} NewTerminalNode */
-/** @typedef {RepoNode | WorktreeNode | SectionNode | TerminalNode | NewTerminalNode | GroupNode | ChangeNode} Node */
+/** @typedef {{ kind: 'clean', id: string, wt: Worktree }} CleanNode */
+/** @typedef {RepoNode | WorktreeNode | SectionNode | TerminalNode | NewTerminalNode | GroupNode | ChangeNode | CleanNode} Node */
 
 // ---------------------------------------------------------------- process helpers
 
@@ -915,17 +916,21 @@ class WorktreeTree {
     switch (el.kind) {
       case 'repo':
         return this.repoChildren(el.repo);
-      case 'worktree':
-        return [this.sectionNode(el.wt, 'terminals'), this.sectionNode(el.wt, 'changes')];
-      case 'section': {
+      case 'worktree': {
+        // Changes first (like Source Control), then the terminals.
         const wt = el.wt;
-        if (el.section === 'terminals') {
-          const terms = deck.terminalsOf(wt.path).map((t) => this.termNode(t, wt.path));
-          return terms.length ? terms : [this.node({ kind: 'newTerminal', id: `newTerminal:${wt.path}`, wt })];
-        }
-        return /** @type {Group[]} */ (['staged', 'unstaged'])
+        /** @type {Node[]} */
+        const out = /** @type {Group[]} */ (['staged', 'unstaged'])
           .filter((g) => deck.changesOf(wt.path, g).length)
           .map((group) => this.node({ kind: 'group', id: `${group}:${wt.path}`, wt, group }));
+        if (!out.length) out.push(this.node({ kind: 'clean', id: `clean:${wt.path}`, wt }));
+        out.push(this.sectionNode(wt, 'terminals'));
+        return out;
+      }
+      case 'section': {
+        const wt = el.wt;
+        const terms = deck.terminalsOf(wt.path).map((t) => this.termNode(t, wt.path));
+        return terms.length ? terms : [this.node({ kind: 'newTerminal', id: `newTerminal:${wt.path}`, wt })];
       }
       case 'group':
         return deck.changesOf(el.wt.path, el.group).map((c) =>
@@ -953,9 +958,9 @@ class WorktreeTree {
       case 'worktree':
         return single ? undefined : this.repoNode(el.wt.repo);
       case 'section':
-        return this.wtNode(el.wt);
       case 'group':
-        return this.sectionNode(el.wt, 'changes');
+      case 'clean':
+        return this.wtNode(el.wt);
       case 'change':
         return this.nodes.get(`${el.group}:${el.wt.path}`);
       default:
@@ -975,7 +980,6 @@ class WorktreeTree {
         const item = new vscode.TreeItem(el.repo.name, Expanded);
         item.id = el.id;
         item.iconPath = new vscode.ThemeIcon('repo');
-        item.description = `${el.repo.worktrees.length} worktree${el.repo.worktrees.length === 1 ? '' : 's'}`;
         item.tooltip = el.repo.root;
         item.contextValue = 'repo';
         return item;
@@ -989,40 +993,36 @@ class WorktreeTree {
         const unstaged = deck.changesOf(wt.path, 'unstaged').length;
         const working = terms.some((t) => deck.isWorking(t));
         const idle = !working && terms.some((t) => deck.isIdleAgent(t));
-        const isActive = deck.active === wt.path;
         const session = deck.sessions.get(wt.path);
         const title = wtTitle(wt, deck);
         const item = new vscode.TreeItem(title, Collapsed);
         item.id = el.id;
+        // The icon carries the agent state; the change count sits right-aligned as a badge.
+        item.resourceUri = decoUri('wt', wt.path, { n: st?.changes.length ?? 0, working, idle });
         const color = new vscode.ThemeColor(hashColor(wt.path));
-        item.iconPath = new vscode.ThemeIcon(
-          working ? 'loading~spin' : idle ? 'sparkle' : isActive ? 'circle-filled' : wt.isMain ? 'repo' : 'git-branch',
-          color,
-        );
+        item.iconPath = new vscode.ThemeIcon(working ? 'loading~spin' : idle ? 'sparkle' : wt.isMain ? 'home' : 'git-branch', color);
 
         const bits = [];
-        if (working) bits.push('working');
-        else if (idle) bits.push('idle');
         if (title !== wtLabel(wt)) bits.push(wtLabel(wt));
         if (session?.prNumber) bits.push(`#${session.prNumber}`);
-        if (st?.ahead) bits.push(`↑${st.ahead}`);
-        if (st?.behind) bits.push(`↓${st.behind}`);
-        if (staged) bits.push(`✓${staged}`);
-        if (unstaged) bits.push(`±${unstaged}`);
-        if (terms.length) bits.push(`${terms.length} term`);
+        const sync = `${st?.ahead ? `↑${st.ahead}` : ''}${st?.behind ? `↓${st.behind}` : ''}`;
+        if (sync) bits.push(sync);
         if (wt.locked) bits.push('locked');
         if (wt.prunable) bits.push('missing');
-        item.description = bits.join(' · ');
+        item.description = bits.join('  ');
 
         const md = new vscode.MarkdownString();
-        md.appendMarkdown(`**${title}**${wt.isMain ? ' (main checkout)' : ''}\n\n`);
-        if (title !== wtLabel(wt)) md.appendMarkdown(`Branch \`${wtLabel(wt)}\`\n\n`);
-        if (session?.prUrl) md.appendMarkdown(`[PR #${session.prNumber}](${session.prUrl})\n\n`);
-        md.appendMarkdown(`\`${wt.path}\`\n\n`);
-        md.appendMarkdown(`HEAD \`${wt.head.slice(0, 10)}\``);
-        if (st?.upstream) md.appendMarkdown(` · tracking \`${st.upstream}\` (↑${st.ahead} ↓${st.behind})`);
-        md.appendMarkdown(`\n\n${staged} staged · ${unstaged} changed`);
-        if (terms.length) md.appendMarkdown(`\n\nTerminals: ${terms.map((t) => deck.displayName(t)).join(', ')}`);
+        md.appendMarkdown(`**${title}**\n\n`);
+        md.appendMarkdown(`$(git-branch) \`${wtLabel(wt)}\`${wt.isMain ? ' — main checkout' : ''}\n\n`);
+        if (session?.prUrl) md.appendMarkdown(`$(git-pull-request) [#${session.prNumber}](${session.prUrl})\n\n`);
+        if (st?.upstream) md.appendMarkdown(`$(cloud) \`${st.upstream}\` ↑${st.ahead} ↓${st.behind}\n\n`);
+        md.appendMarkdown(`$(diff) ${staged} staged · ${unstaged} changed\n\n`);
+        md.appendMarkdown(`$(terminal) ${terms.length ? terms.map((t) => deck.displayName(t)).join(', ') : 'no terminals'}`);
+        if (working) md.appendMarkdown(`\n\n$(loading~spin) agent working`);
+        else if (idle) md.appendMarkdown(`\n\n$(sparkle) agent waiting for you`);
+        md.appendMarkdown(`\n\n<small>${wt.path}</small>`);
+        md.supportThemeIcons = true;
+        md.supportHtml = true;
         item.tooltip = md;
         item.contextValue = (wt.isMain ? 'worktreeMain' : 'worktree') + (session?.prUrl ? ' hasPr' : '');
         // No command on purpose: a click toggles the dropdown, and selection switches the terminal.
@@ -1030,22 +1030,20 @@ class WorktreeTree {
       }
 
       case 'section': {
-        const wt = el.wt;
-        if (el.section === 'terminals') {
-          const n = deck.terminalsOf(wt.path).length;
-          const item = new vscode.TreeItem('Terminals', Expanded);
-          item.id = el.id;
-          item.description = String(n);
-          item.iconPath = new vscode.ThemeIcon('terminal');
-          item.contextValue = 'terminalsSection';
-          return item;
-        }
-        const n = deck.status.get(wt.path)?.changes.length ?? 0;
-        const item = new vscode.TreeItem('Changes', n ? Expanded : None);
+        const n = deck.terminalsOf(el.wt.path).length;
+        const item = new vscode.TreeItem('Terminals', Expanded);
         item.id = el.id;
-        item.description = n ? String(n) : 'clean';
-        item.iconPath = new vscode.ThemeIcon('source-control');
-        item.contextValue = 'changesSection';
+        item.description = n ? String(n) : '';
+        item.iconPath = new vscode.ThemeIcon('terminal');
+        item.contextValue = 'terminalsSection';
+        return item;
+      }
+
+      case 'clean': {
+        const item = new vscode.TreeItem('No changes', None);
+        item.id = el.id;
+        item.iconPath = new vscode.ThemeIcon('check', new vscode.ThemeColor('descriptionForeground'));
+        item.resourceUri = decoUri('muted', el.wt.path, {});
         return item;
       }
 
@@ -1053,7 +1051,6 @@ class WorktreeTree {
         const item = new vscode.TreeItem('New terminal', None);
         item.id = el.id;
         item.iconPath = new vscode.ThemeIcon('add');
-        item.description = 'none linked';
         item.command = { command: 'agentDeck.newTerminal', title: 'New Terminal', arguments: [el.wt.path] };
         return item;
       }
@@ -1069,8 +1066,11 @@ class WorktreeTree {
           proc?.working ? 'loading~spin' : proc?.agent ? 'sparkle' : cmdRunning ? 'play-circle' : 'terminal',
           color,
         );
-        const what = proc?.agent ? `${proc.agent} · ${proc.working ? 'working' : 'idle'}` : cmdRunning ? lastCommand.get(t) : undefined;
-        item.description = [what ?? '', vscode.window.activeTerminal === t ? 'active' : ''].filter(Boolean).join(' · ');
+        item.description = proc?.agent
+          ? `${proc.agent} · ${proc.working ? 'working' : 'waiting for you'}`
+          : cmdRunning
+            ? lastCommand.get(t)
+            : '';
         item.contextValue = 'terminal';
         item.command = { command: 'agentDeck.showTerminal', title: 'Show Terminal', arguments: [el] };
         return item;
@@ -1078,31 +1078,59 @@ class WorktreeTree {
 
       case 'group': {
         const n = deck.changesOf(el.wt.path, el.group).length;
-        const item = new vscode.TreeItem(el.group === 'staged' ? 'Staged' : 'Unstaged', Expanded);
+        const item = new vscode.TreeItem(el.group === 'staged' ? 'Staged Changes' : 'Changes', Expanded);
         item.id = el.id;
         item.description = String(n);
-        item.iconPath = new vscode.ThemeIcon(el.group === 'staged' ? 'check' : 'diff');
         item.contextValue = el.group === 'staged' ? 'stagedGroup' : 'changesGroup';
         return item;
       }
 
       case 'change': {
         const c = el.change;
-        const uri = vscode.Uri.file(path.join(el.wt.path, c.path));
         const [letter, colorId] = describeCode(c.code, el.group);
-        const item = new vscode.TreeItem(uri, None);
+        // A decoration URI gives the file-type icon, a git-coloured name and the status letter,
+        // exactly like the Source Control view.
+        const item = new vscode.TreeItem(decoUri('file', path.join(el.wt.path, c.path), { letter, colorId }), None);
         item.id = el.id;
-        item.label = path.basename(c.path);
-        const dir = path.dirname(c.path);
-        item.description = `${letter}${dir === '.' ? '' : `  ${dir}`}`;
-        item.tooltip = `${c.orig ? `${c.orig} → ` : ''}${c.path}  (${c.code.trim() || c.code})`;
-        item.iconPath = new vscode.ThemeIcon('circle-small-filled', new vscode.ThemeColor(colorId));
+        // Untracked directories come back from git as "dir/".
+        const isDir = c.path.endsWith('/');
+        if (isDir) item.iconPath = vscode.ThemeIcon.Folder;
+        item.label = path.basename(c.path) + (isDir ? '/' : '');
+        const dir = path.dirname(c.path.replace(/\/$/, ''));
+        item.description = dir === '.' ? '' : dir;
+        item.tooltip = `${c.orig ? `${c.orig} → ` : ''}${c.path}`;
         item.contextValue = el.group === 'staged' ? 'stagedChange' : 'change';
         item.command = { command: 'agentDeck.openChange', title: 'Open Changes', arguments: [el] };
         return item;
       }
-
     }
+  }
+}
+
+// ---------------------------------------------------------------- decorations
+
+const DECO_SCHEME = 'agentdeck-deco';
+
+/** A URI whose only job is to carry decoration data for a tree row. */
+function decoUri(kind, p, data) {
+  return vscode.Uri.from({ scheme: DECO_SCHEME, path: p, query: JSON.stringify({ kind, ...data }) });
+}
+
+/** @implements {vscode.FileDecorationProvider} */
+class Decorations {
+  /** @param {vscode.Uri} uri */
+  provideFileDecoration(uri) {
+    if (uri.scheme !== DECO_SCHEME) return undefined;
+    const d = JSON.parse(uri.query);
+    switch (d.kind) {
+      case 'file':
+        return new vscode.FileDecoration(d.letter, undefined, new vscode.ThemeColor(d.colorId));
+      case 'wt':
+        return d.n ? new vscode.FileDecoration(d.n > 99 ? '99' : String(d.n), `${d.n} changed file(s)`) : undefined;
+      case 'muted':
+        return new vscode.FileDecoration(undefined, undefined, new vscode.ThemeColor('descriptionForeground'));
+    }
+    return undefined;
   }
 }
 
@@ -1239,6 +1267,28 @@ function activate(ctx) {
     }, 50);
   };
 
+  // Accordion: opening a worktree closes the others. The tree API can't collapse a single row, so
+  // collapse everything and re-open the one that was just expanded (plus its groups).
+  const expanded = new Set();
+  let accordionBusy = false;
+  view.onDidCollapseElement((e) => e.element.kind === 'worktree' && expanded.delete(e.element.id));
+  view.onDidExpandElement(async (e) => {
+    const n = e.element;
+    if (n.kind !== 'worktree' || accordionBusy) return;
+    const others = [...expanded].some((id) => id !== n.id);
+    expanded.add(n.id);
+    if (!others) return;
+    accordionBusy = true;
+    try {
+      await vscode.commands.executeCommand('workbench.actions.treeView.agentDeck.worktrees.collapseAll');
+      expanded.clear();
+      await view.reveal(n, { expand: 2, select: false, focus: false });
+      expanded.add(n.id);
+    } finally {
+      accordionBusy = false;
+    }
+  });
+
   // Selecting a worktree row (mouse or arrow keys) switches to its terminal without taking focus
   // from the tree; the click itself toggles the dropdown.
   let revealing = false;
@@ -1335,6 +1385,7 @@ function activate(ctx) {
     { dispose: () => deck.gitWatchers.forEach((w) => w.dispose()) },
     { dispose: () => files.watcher?.dispose() },
     vscode.workspace.registerTextDocumentContentProvider(GIT_SCHEME, new GitContent()),
+    vscode.window.registerFileDecorationProvider(new Decorations()),
 
     vscode.window.onDidChangeActiveTerminal(syncFromTerminal),
     vscode.window.onDidOpenTerminal(() => {
@@ -1566,7 +1617,7 @@ function activate(ctx) {
     }
   });
 
-  return { deck, tree };
+  return { deck, tree, view };
 }
 
 function deactivate() {}

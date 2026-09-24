@@ -47,14 +47,14 @@ exports.run = async function () {
   assert.strictEqual(vscode.window.terminals.filter((t) => t.name === 'feat-a').length, 1);
   console.log('✓ selecting feat-a switches to its existing terminal');
 
-  // Tree structure: worktree -> [Terminals, Changes]
+  // Tree structure: worktree -> [No changes, Terminals]; changes come first.
   {
     const { tree } = ext.exports;
     const secs = (await tree.getChildren(tree.wtNode(a))).map((n) => tree.getTreeItem(n).label);
-    assert.deepStrictEqual(secs, ['Terminals', 'Changes']);
+    assert.deepStrictEqual(secs, ['No changes', 'Terminals']);
     const terms = await tree.getChildren(tree.sectionNode(a, 'terminals'));
     assert.deepStrictEqual(terms.map((n) => tree.getTreeItem(n).label), ['feat-a']);
-    console.log('✓ worktree dropdown = [Terminals (feat-a), Changes]');
+    console.log('✓ worktree dropdown = [No changes, Terminals (feat-a)]');
   }
 
   // Focus terminal B directly (like clicking its tab) -> active worktree follows.
@@ -135,10 +135,9 @@ exports.run = async function () {
   console.log('✓ feat-a: Staged = [staged.txt], Changes = [README.md, new.txt]; feat-b clean');
 
   const { tree } = ext.exports;
-  const kids = await tree.getChildren(tree.sectionNode(a, 'changes'));
-  const groups = kids.filter((k) => k.kind === 'group').map((k) => tree.getTreeItem(k).label);
-  assert.deepStrictEqual(groups, ['Staged', 'Unstaged']);
-  console.log('✓ feat-a › Changes shows "Staged" and "Unstaged" groups');
+  const kids = await tree.getChildren(tree.wtNode(a));
+  assert.deepStrictEqual(kids.map((k) => tree.getTreeItem(k).label), ['Staged Changes', 'Changes', 'Terminals']);
+  console.log('✓ feat-a dropdown = [Staged Changes, Changes, Terminals] (changes on top)');
 
   // Stage README via the command, then check the index diff content provider.
   const readmeNode = (await tree.getChildren(kids.find((k) => k.group === 'unstaged'))).find((n) => n.change.path === 'README.md');
