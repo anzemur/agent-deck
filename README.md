@@ -2,7 +2,7 @@
 
 Worktrees and terminals, linked, for running many coding agents at once in VS Code / Cursor.
 
-- **Worktrees view** (activity bar → Agent Deck): every git worktree of every repo in the window.
+- **Worktrees panel** (activity bar → Agent Deck): every git worktree of the repo(s) in the window, as roomy two-line cards (task title + branch) with your Seti file icons.
 - Worktrees are named after **what the agent is doing**: the Claude session title (your `/rename` wins), with the branch and PR number next to it. Set `agentDeck.worktreeLabel` to `branch` to turn this off.
 - The **active worktree** is drawn in its own colour with a ● badge, and its name is shown in the view header.
 - **Click a worktree** → it opens (and every other worktree closes) and its linked terminal comes to the front (nothing is created; use *New terminal*).

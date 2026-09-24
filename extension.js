@@ -48,17 +48,7 @@ const COLORS = [
 /** @typedef {{ title: string | undefined, prs: { number: number, url: string }[] }} SessionInfo */
 /** @typedef {{ number: number, url: string, title: string | undefined, state: string | undefined, isDraft: boolean, own: boolean }} PullRequest  own = this worktree's branch is its head */
 
-/** @typedef {{ kind: 'repo', id: string, repo: Repo }} RepoNode */
-/** @typedef {{ kind: 'worktree', id: string, wt: Worktree }} WorktreeNode */
-/** @typedef {{ kind: 'terminal', id: string, terminal: vscode.Terminal, wtPath: string }} TerminalNode */
 /** @typedef {'staged' | 'unstaged'} Group */
-/** @typedef {{ kind: 'group', id: string, wt: Worktree, group: Group }} GroupNode */
-/** @typedef {{ kind: 'change', id: string, wt: Worktree, group: Group, change: Change }} ChangeNode */
-/** @typedef {{ kind: 'section', id: string, wt: Worktree, section: 'terminals' | 'prs' }} SectionNode */
-/** @typedef {{ kind: 'pr', id: string, wt: Worktree, pr: PullRequest }} PrNode */
-/** @typedef {{ kind: 'newTerminal', id: string, wt: Worktree }} NewTerminalNode */
-/** @typedef {{ kind: 'clean', id: string, wt: Worktree }} CleanNode */
-/** @typedef {RepoNode | WorktreeNode | SectionNode | TerminalNode | NewTerminalNode | GroupNode | ChangeNode | CleanNode | PrNode} Node */
 
 // ---------------------------------------------------------------- process helpers
 
@@ -933,319 +923,203 @@ class GitContent {
   }
 }
 
-// ---------------------------------------------------------------- worktree tree
+// ---------------------------------------------------------------- worktree panel (webview)
 
-/** @implements {vscode.TreeDataProvider<Node>} */
-class WorktreeTree {
-  /** @param {Deck} deck */
-  constructor(deck) {
-    this.deck = deck;
-    this._onDidChange = new vscode.EventEmitter();
-    this.onDidChangeTreeData = this._onDidChange.event;
-    /** @type {Map<string, Node>} stable node objects so reveal() can find them */
-    this.nodes = new Map();
-    /** @type {Map<vscode.Terminal, string>} */
-    this.termIds = new Map();
-    this.nextTermId = 0;
-    deck.onChange(() => this._onDidChange.fire(undefined));
+const SETI = require('./media/seti-map.json');
+
+/** Seti glyph + colours for a file, the same lookup order the icon theme uses. */
+function setiFor(relPath) {
+  const base = path.basename(relPath).toLowerCase();
+  if (SETI.name[base]) return SETI.name[base];
+  const parts = base.split('.');
+  // Longest compound extension first: "d.ts" before "ts".
+  for (let i = 1; i < parts.length; i++) {
+    const hit = SETI.ext[parts.slice(i).join('.')];
+    if (hit) return hit;
   }
+  return SETI.default;
+}
 
-  /** @template {Node} T @param {T} n @returns {T} */
-  node(n) {
-    const prev = this.nodes.get(n.id);
-    if (prev) return /** @type {T} */ (Object.assign(prev, n));
-    this.nodes.set(n.id, n);
-    return n;
-  }
+/**
+ * Everything the panel draws, as plain JSON. The webview only renders this; tests assert on it.
+ * @param {Deck} deck
+ * @param {(t: vscode.Terminal) => string} termId
+ */
+function buildModel(deck, termId) {
+  const worktrees = deck.worktrees.map((wt) => {
+    const terms = deck.terminalsOf(wt.path);
+    const st = deck.status.get(wt.path);
+    const working = terms.some((t) => deck.isWorking(t));
+    const idle = !working && terms.some((t) => deck.isIdleAgent(t));
+    const prs = deck.prs.get(wt.path) ?? [];
+    const ownPr = prs.find((p) => p.own);
+    const title = wtTitle(wt, deck);
+    const active = deck.active === wt.path;
+    const n = st?.changes.length ?? 0;
 
-  repoNode(repo) {
-    return this.node({ kind: 'repo', id: `repo:${repo.commonDir}`, repo });
-  }
+    /** @type {{ icon?: string, text: string }[]} */
+    const meta = [{ icon: 'git-branch', text: wtLabel(wt) }];
+    if (ownPr) meta.push({ icon: 'git-pull-request', text: `#${ownPr.number}` });
+    if (st?.ahead || st?.behind) meta.push({ text: `${st.ahead ? `↑${st.ahead}` : ''}${st.behind ? ` ↓${st.behind}` : ''}`.trim() });
+    if (wt.locked) meta.push({ text: 'locked' });
+    if (wt.prunable) meta.push({ text: 'missing' });
 
-  wtNode(wt) {
-    return this.node({ kind: 'worktree', id: `wt:${wt.path}`, wt });
-  }
+    const files = (group) =>
+      deck.changesOf(wt.path, group).map((c) => {
+        const [letter, colorId] = describeCode(c.code, group);
+        const isDir = c.path.endsWith('/');
+        const clean = c.path.replace(/\/$/, '');
+        const dir = path.dirname(clean);
+        return {
+          group, path: c.path, orig: c.orig, code: c.code, letter, colorId, isDir,
+          name: path.basename(clean) + (isDir ? '/' : ''),
+          dir: dir === '.' ? '' : dir,
+          seti: isDir ? null : setiFor(clean),
+          tooltip: `${c.orig ? `${c.orig} → ` : ''}${c.path}`,
+        };
+      });
 
-  sectionNode(wt, section) {
-    return this.node({ kind: 'section', id: `${section}:${wt.path}`, wt, section });
-  }
-
-  termNode(t, wtPath) {
-    let pid = this.termIds.get(t);
-    if (!pid) {
-      pid = String(++this.nextTermId);
-      this.termIds.set(t, pid);
-    }
-    return this.node({ kind: 'terminal', id: `term:${pid}`, terminal: t, wtPath });
-  }
-
-  /** @param {Node} [el] @returns {Promise<Node[]> | Node[]} */
-  getChildren(el) {
-    const deck = this.deck;
-    if (!el) {
-      if (deck.repos.length === 1) return this.repoChildren(deck.repos[0]);
-      return deck.repos.map((r) => this.repoNode(r));
-    }
-    switch (el.kind) {
-      case 'repo':
-        return this.repoChildren(el.repo);
-      case 'worktree': {
-        // Changes first (like Source Control), then the terminals.
-        const wt = el.wt;
-        /** @type {Node[]} */
-        const out = /** @type {Group[]} */ (['staged', 'unstaged'])
-          .filter((g) => deck.changesOf(wt.path, g).length)
-          .map((group) => this.node({ kind: 'group', id: `${group}:${wt.path}`, wt, group }));
-        if (!out.length) out.push(this.node({ kind: 'clean', id: `clean:${wt.path}`, wt }));
-        out.push(this.sectionNode(wt, 'terminals'));
-        out.push(this.sectionNode(wt, 'prs'));
-        return out;
-      }
-      case 'section': {
-        const wt = el.wt;
-        if (el.section === 'prs') {
-          return (deck.prs.get(wt.path) ?? []).map((pr) => this.node({ kind: 'pr', id: `pr:${wt.path}:${pr.number}`, wt, pr }));
-        }
-        const terms = deck.terminalsOf(wt.path).map((t) => this.termNode(t, wt.path));
-        return terms.length ? terms : [this.node({ kind: 'newTerminal', id: `newTerminal:${wt.path}`, wt })];
-      }
-      case 'group':
-        return deck.changesOf(el.wt.path, el.group).map((c) =>
-          this.node({ kind: 'change', id: `${el.group}:${el.wt.path}:${c.path}`, wt: el.wt, group: el.group, change: c }),
-        );
-      default:
-        return [];
-    }
-  }
-
-  repoChildren(repo) {
-    return repo.worktrees.map((w) => this.wtNode(w));
-  }
-
-  /** @param {Node} el */
-  getParent(el) {
-    const single = this.deck.repos.length === 1;
-    switch (el.kind) {
-      case 'terminal': {
-        const wt = this.deck.findWorktree(el.wtPath);
-        return wt && this.sectionNode(wt, 'terminals');
-      }
-      case 'newTerminal':
-        return this.sectionNode(el.wt, 'terminals');
-      case 'worktree':
-        return single ? undefined : this.repoNode(el.wt.repo);
-      case 'section':
-      case 'group':
-      case 'clean':
-        return this.wtNode(el.wt);
-      case 'pr':
-        return this.sectionNode(el.wt, 'prs');
-      case 'change':
-        return this.nodes.get(`${el.group}:${el.wt.path}`);
-      default:
-        return undefined;
-    }
-  }
-
-  /** @param {Node} el */
-  getTreeItem(el) {
-    const deck = this.deck;
-    const None = vscode.TreeItemCollapsibleState.None;
-    const Collapsed = vscode.TreeItemCollapsibleState.Collapsed;
-    const Expanded = vscode.TreeItemCollapsibleState.Expanded;
-
-    switch (el.kind) {
-      case 'repo': {
-        const item = new vscode.TreeItem(el.repo.name, Expanded);
-        item.id = el.id;
-        item.iconPath = new vscode.ThemeIcon('repo');
-        item.tooltip = el.repo.root;
-        item.contextValue = 'repo';
-        return item;
-      }
-
-      case 'worktree': {
-        const wt = el.wt;
-        const terms = deck.terminalsOf(wt.path);
-        const st = deck.status.get(wt.path);
-        const staged = deck.changesOf(wt.path, 'staged').length;
-        const unstaged = deck.changesOf(wt.path, 'unstaged').length;
-        const working = terms.some((t) => deck.isWorking(t));
-        const idle = !working && terms.some((t) => deck.isIdleAgent(t));
-        const prs = deck.prs.get(wt.path) ?? [];
-        const ownPr = prs.find((p) => p.own);
-        const isActive = deck.active === wt.path;
-        const title = wtTitle(wt, deck);
-        const item = new vscode.TreeItem(title, Collapsed);
-        item.id = el.id;
-        // The icon carries the agent state; the change count (and ● when active) sits right-aligned,
-        // and the active worktree's name is drawn in its own colour.
-        item.resourceUri = decoUri('wt', wt.path, { n: st?.changes.length ?? 0, active: isActive, color: hashColor(wt.path) });
-        const color = new vscode.ThemeColor(hashColor(wt.path));
-        item.iconPath = new vscode.ThemeIcon(working ? 'loading~spin' : idle ? 'sparkle' : wt.isMain ? 'home' : 'git-branch', color);
-
-        const bits = [];
-        if (title !== wtLabel(wt)) bits.push(wtLabel(wt));
-        if (ownPr) bits.push(`#${ownPr.number}`);
-        const sync = `${st?.ahead ? `↑${st.ahead}` : ''}${st?.behind ? `↓${st.behind}` : ''}`;
-        if (sync) bits.push(sync);
-        if (wt.locked) bits.push('locked');
-        if (wt.prunable) bits.push('missing');
-        item.description = bits.join('  ');
-
-        const md = new vscode.MarkdownString();
-        md.appendMarkdown(`**${title}**\n\n`);
-        md.appendMarkdown(`$(git-branch) \`${wtLabel(wt)}\`${wt.isMain ? ' — main checkout' : ''}\n\n`);
-        for (const p of prs) md.appendMarkdown(`$(git-pull-request) [#${p.number}](${p.url}) ${p.title ?? ''}\n\n`);
-        if (st?.upstream) md.appendMarkdown(`$(cloud) \`${st.upstream}\` ↑${st.ahead} ↓${st.behind}\n\n`);
-        md.appendMarkdown(`$(diff) ${staged} staged · ${unstaged} changed\n\n`);
-        md.appendMarkdown(`$(terminal) ${terms.length ? terms.map((t) => deck.displayName(t)).join(', ') : 'no terminals'}`);
-        if (working) md.appendMarkdown(`\n\n$(loading~spin) agent working`);
-        else if (idle) md.appendMarkdown(`\n\n$(sparkle) agent waiting for you`);
-        md.appendMarkdown(`\n\n<small>${wt.path}</small>`);
-        md.supportThemeIcons = true;
-        md.supportHtml = true;
-        item.tooltip = md;
-        item.contextValue = (wt.isMain ? 'worktreeMain' : 'worktree') + (prs.length ? ' hasPr' : '');
-        // No command on purpose: a click toggles the dropdown, and selection switches the terminal.
-        return item;
-      }
-
-      case 'section': {
-        if (el.section === 'prs') {
-          const n = (deck.prs.get(el.wt.path) ?? []).length;
-          const item = new vscode.TreeItem('Pull Requests', n ? Expanded : None);
-          item.id = el.id;
-          item.description = n ? String(n) : 'none';
-          item.iconPath = new vscode.ThemeIcon('git-pull-request');
-          item.contextValue = 'prsSection';
-          return item;
-        }
-        const n = deck.terminalsOf(el.wt.path).length;
-        const item = new vscode.TreeItem('Terminals', Expanded);
-        item.id = el.id;
-        item.description = n ? String(n) : '';
-        item.iconPath = new vscode.ThemeIcon('terminal');
-        item.contextValue = 'terminalsSection';
-        return item;
-      }
-
-      case 'clean': {
-        const item = new vscode.TreeItem('No changes', None);
-        item.id = el.id;
-        item.iconPath = new vscode.ThemeIcon('check', new vscode.ThemeColor('descriptionForeground'));
-        item.resourceUri = decoUri('muted', el.wt.path, {});
-        return item;
-      }
-
-      case 'newTerminal': {
-        const item = new vscode.TreeItem('New terminal', None);
-        item.id = el.id;
-        item.iconPath = new vscode.ThemeIcon('add');
-        item.command = { command: 'agentDeck.newTerminal', title: 'New Terminal', arguments: [el.wt.path] };
-        return item;
-      }
-
-      case 'terminal': {
-        const t = el.terminal;
+    /** @type {any[]} */
+    const sections = [];
+    const staged = files('staged'), unstaged = files('unstaged');
+    if (staged.length) sections.push({ kind: 'staged', title: 'Staged Changes', files: staged });
+    if (unstaged.length) sections.push({ kind: 'unstaged', title: 'Changes', files: unstaged });
+    if (!staged.length && !unstaged.length) sections.push({ kind: 'clean' });
+    sections.push({
+      kind: 'terminals',
+      terminals: terms.map((t) => {
         const proc = deck.procs.get(t);
-        const cmdRunning = deck.isRunningCommand(t);
-        const item = new vscode.TreeItem(deck.displayName(t), None);
-        item.id = el.id;
-        const color = new vscode.ThemeColor(hashColor(el.wtPath));
-        item.iconPath = new vscode.ThemeIcon(
-          proc?.working ? 'loading~spin' : proc?.agent ? 'sparkle' : cmdRunning ? 'play-circle' : 'terminal',
-          color,
-        );
-        item.description = proc?.agent
-          ? `${proc.agent} · ${proc.working ? 'working' : 'waiting for you'}`
-          : cmdRunning
-            ? lastCommand.get(t)
-            : '';
-        item.contextValue = 'terminal';
-        item.command = { command: 'agentDeck.showTerminal', title: 'Show Terminal', arguments: [el] };
-        return item;
-      }
-
-      case 'pr': {
-        const pr = el.pr;
-        const state = pr.isDraft && pr.state === 'OPEN' ? 'DRAFT' : pr.state;
-        const look = {
+        const cmd = deck.isRunningCommand(t);
+        return {
+          id: termId(t),
+          name: deck.displayName(t),
+          icon: proc?.working ? 'loading' : proc?.agent ? 'sparkle' : cmd ? 'play-circle' : 'terminal',
+          spin: !!proc?.working,
+          sub: proc?.agent ? `${proc.agent} · ${proc.working ? 'working' : 'waiting for you'}` : cmd ? lastCommand.get(t) ?? '' : '',
+        };
+      }),
+    });
+    sections.push({
+      kind: 'prs',
+      prs: prs.map((p) => {
+        const state = p.isDraft && p.state === 'OPEN' ? 'DRAFT' : p.state;
+        const [icon, colorId, word] = {
           OPEN: ['git-pull-request', 'charts.green', 'open'],
           DRAFT: ['git-pull-request-draft', 'descriptionForeground', 'draft'],
           MERGED: ['git-merge', 'charts.purple', 'merged'],
           CLOSED: ['git-pull-request-closed', 'charts.red', 'closed'],
         }[state ?? ''] ?? ['git-pull-request', 'descriptionForeground', ''];
-        const item = new vscode.TreeItem(`#${pr.number}  ${pr.title ?? ''}`.trim(), None);
-        item.id = el.id;
-        item.iconPath = new vscode.ThemeIcon(look[0], new vscode.ThemeColor(look[1]));
-        item.description = [look[2], pr.own ? '' : 'from session'].filter(Boolean).join(' · ');
-        item.tooltip = new vscode.MarkdownString(`**#${pr.number}** ${pr.title ?? ''}\n\n${look[2]}${pr.own ? ' · this branch' : ' · linked in the Claude session'}\n\n${pr.url}`);
-        item.contextValue = 'pr';
-        item.command = { command: 'agentDeck.openPrLink', title: 'Open Pull Request', arguments: [el] };
-        return item;
-      }
+        return {
+          number: p.number, title: p.title, url: p.url, icon, colorId,
+          sub: [word, p.own ? '' : 'from session'].filter(Boolean).join(' · '),
+          tooltip: `#${p.number} ${p.title ?? ''}\n${word}${p.own ? ' · this branch' : ' · linked in the Claude session'}\n${p.url}`,
+        };
+      }),
+    });
 
-      case 'group': {
-        const n = deck.changesOf(el.wt.path, el.group).length;
-        const item = new vscode.TreeItem(el.group === 'staged' ? 'Staged Changes' : 'Changes', Expanded);
-        item.id = el.id;
-        item.description = String(n);
-        item.contextValue = el.group === 'staged' ? 'stagedGroup' : 'changesGroup';
-        return item;
-      }
+    const tooltip = [
+      title,
+      `Branch: ${wtLabel(wt)}${wt.isMain ? ' (main checkout)' : ''}`,
+      st?.upstream ? `Upstream: ${st.upstream} ↑${st.ahead} ↓${st.behind}` : '',
+      `${staged.length} staged · ${unstaged.length} changed`,
+      working ? 'Agent working' : idle ? 'Agent waiting for you' : '',
+      wt.path,
+    ].filter(Boolean).join('\n');
 
-      case 'change': {
-        const c = el.change;
-        const [letter, colorId] = describeCode(c.code, el.group);
-        // A decoration URI gives the file-type icon, a git-coloured name and the status letter,
-        // exactly like the Source Control view.
-        const item = new vscode.TreeItem(decoUri('file', path.join(el.wt.path, c.path), { letter, colorId }), None);
-        item.id = el.id;
-        // Untracked directories come back from git as "dir/".
-        const isDir = c.path.endsWith('/');
-        if (isDir) item.iconPath = vscode.ThemeIcon.Folder;
-        item.label = path.basename(c.path) + (isDir ? '/' : '');
-        const dir = path.dirname(c.path.replace(/\/$/, ''));
-        item.description = dir === '.' ? '' : dir;
-        item.tooltip = `${c.orig ? `${c.orig} → ` : ''}${c.path}`;
-        item.contextValue = el.group === 'staged' ? 'stagedChange' : 'change';
-        item.command = { command: 'agentDeck.openChange', title: 'Open Changes', arguments: [el] };
-        return item;
-      }
-    }
+    return {
+      path: wt.path, repo: wt.repo.name, title, branch: wtLabel(wt), isMain: wt.isMain, active,
+      colorVar: `var(--vscode-${hashColor(wt.path).replace(/\./g, '-')})`,
+      state: working ? 'working' : idle ? 'idle' : '',
+      // Badges: "●3" on the active worktree, plain change count on the others.
+      badge: active ? `●${n || ''}` : n ? String(n) : '',
+      meta, sections, tooltip,
+      context: { webviewSection: 'worktree', wtPath: wt.path, isMain: wt.isMain, hasPr: prs.length > 0 },
+    };
+  });
+  return { worktrees, active: deck.active, multiRepo: deck.repos.length > 1 };
+}
+
+/** @implements {vscode.WebviewViewProvider} */
+class PanelProvider {
+  /** @param {vscode.ExtensionContext} ctx @param {Deck} deck */
+  constructor(ctx, deck) {
+    this.ctx = ctx;
+    this.deck = deck;
+    /** @type {vscode.WebviewView | undefined} */
+    this.view = undefined;
+    /** @type {Map<vscode.Terminal, string>} */
+    this.termIds = new Map();
+    this.nextTermId = 0;
+    this.pending = undefined;
+    this._onSelect = new vscode.EventEmitter();
+    this.onSelect = this._onSelect.event;
+    deck.onChange(() => this.schedule());
   }
-}
 
-// ---------------------------------------------------------------- decorations
-
-const DECO_SCHEME = 'agentdeck-deco';
-
-/** A URI whose only job is to carry decoration data for a tree row. */
-function decoUri(kind, p, data) {
-  return vscode.Uri.from({ scheme: DECO_SCHEME, path: p, query: JSON.stringify({ kind, ...data }) });
-}
-
-/** @implements {vscode.FileDecorationProvider} */
-class Decorations {
-  /** @param {vscode.Uri} uri */
-  provideFileDecoration(uri) {
-    if (uri.scheme !== DECO_SCHEME) return undefined;
-    const d = JSON.parse(uri.query);
-    switch (d.kind) {
-      case 'file':
-        return new vscode.FileDecoration(d.letter, undefined, new vscode.ThemeColor(d.colorId));
-      case 'wt': {
-        // Badges hold at most 2 characters: "●3" when active, the plain count otherwise.
-        const count = d.n ? (d.n > 99 ? '99' : String(d.n)) : '';
-        const badge = d.active ? (d.n > 9 ? count : `●${count}`) : count;
-        const tooltip = [d.active ? 'active worktree' : '', d.n ? `${d.n} changed file(s)` : ''].filter(Boolean).join(' · ');
-        return new vscode.FileDecoration(badge || undefined, tooltip || undefined, d.active ? new vscode.ThemeColor(d.color) : undefined);
-      }
-      case 'muted':
-        return new vscode.FileDecoration(undefined, undefined, new vscode.ThemeColor('descriptionForeground'));
+  termId(t) {
+    let id = this.termIds.get(t);
+    if (!id) {
+      id = `t${++this.nextTermId}`;
+      this.termIds.set(t, id);
     }
+    return id;
+  }
+
+  terminalById(id) {
+    for (const [t, tid] of this.termIds) if (tid === id) return t;
     return undefined;
+  }
+
+  model() {
+    return buildModel(this.deck, (t) => this.termId(t));
+  }
+
+  /** Coalesce bursts of changes into one post. */
+  schedule() {
+    if (this.pending) return;
+    this.pending = setTimeout(() => {
+      this.pending = undefined;
+      this.post();
+    }, 30);
+  }
+
+  post() {
+    this.view?.webview.postMessage({ type: 'state', model: this.model() });
+  }
+
+  reveal(wtPath) {
+    this.view?.webview.postMessage({ type: 'reveal', path: wtPath });
+  }
+
+  /** @param {vscode.WebviewView} view */
+  resolveWebviewView(view) {
+    this.view = view;
+    const media = vscode.Uri.joinPath(this.ctx.extensionUri, 'media');
+    view.webview.options = { enableScripts: true, localResourceRoots: [media] };
+    const uri = (f) => view.webview.asWebviewUri(vscode.Uri.joinPath(media, f));
+    const nonce = [...Array(24)].map(() => Math.random().toString(36)[2]).join('');
+    const csp = view.webview.cspSource;
+    view.webview.html = `<!doctype html><html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; font-src ${csp}; style-src ${csp} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+@font-face { font-family: 'codicon'; src: url('${uri('codicon.ttf')}') format('truetype'); }
+@font-face { font-family: 'seti'; src: url('${uri('seti.woff')}') format('woff'); }
+</style>
+<link rel="stylesheet" href="${uri('panel.css')}">
+</head><body data-vscode-context='{"preventDefaultContextMenuItems": true}'>
+<div id="root" role="tree" aria-label="Worktrees"></div>
+<script nonce="${nonce}" src="${uri('panel.js')}"></script>
+</body></html>`;
+    view.webview.onDidReceiveMessage((m) => {
+      if (m.type === 'ready') this.post();
+      else if (m.type === 'select') this._onSelect.fire(m.path);
+      else if (m.type === 'rendered') this.lastRender = m; // lets tests see what the panel drew
+      else if (m.type === 'command' && typeof m.command === 'string' && m.command.startsWith('agentDeck.')) {
+        vscode.commands.executeCommand(m.command, m.arg);
+      }
+    });
+    view.onDidChangeVisibility(() => view.visible && this.post());
   }
 }
 
@@ -1336,10 +1210,9 @@ class FilesTree {
 /** @param {vscode.ExtensionContext} ctx */
 function activate(ctx) {
   const deck = new Deck(ctx);
-  const tree = new WorktreeTree(deck);
+  const panel = new PanelProvider(ctx, deck);
   const files = new FilesTree(deck);
 
-  const view = vscode.window.createTreeView('agentDeck.worktrees', { treeDataProvider: tree, showCollapseAll: true });
   const filesView = vscode.window.createTreeView('agentDeck.files', { treeDataProvider: files, showCollapseAll: false });
 
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
@@ -1352,68 +1225,32 @@ function activate(ctx) {
       const n = deck.changesOf(wt.path, 'unstaged').length + deck.changesOf(wt.path, 'staged').length;
       status.text = `$(git-branch) ${wtTitle(wt, deck)}${n ? ` ±${n}` : ''}`;
       status.show();
-      view.description = wtTitle(wt, deck);
+      if (panel.view) panel.view.description = wtTitle(wt, deck);
       filesView.description = wtLabel(wt);
       filesView.message = undefined;
     } else {
       status.hide();
-      view.description = undefined;
+      if (panel.view) panel.view.description = undefined;
       filesView.description = undefined;
       filesView.message = deck.repos.length ? 'Select a worktree.' : undefined;
     }
   };
   deck.onChange(updateChrome);
 
-  /** Reflect the active terminal's worktree in the tree without stealing focus. */
+  /** Reflect the active terminal's worktree in the panel without stealing focus. */
   const syncFromTerminal = (t) => {
     if (!t) return;
     const wt = deck.worktreeOf(t);
     if (!wt) return;
     deck.lastTerminal.set(wt.path, t);
     deck.setActive(wt.path);
-    tree._onDidChange.fire(undefined);
-    if (!view.visible) return;
-    const target = deck.terminalsOf(wt.path).includes(t) ? tree.termNode(t, wt.path) : tree.wtNode(wt);
-    // Give the tree a tick to re-render before revealing.
-    setTimeout(() => {
-      revealing = true;
-      view.reveal(target, { select: true, focus: false, expand: true }).then(
-        () => setTimeout(() => (revealing = false), 50),
-        () => (revealing = false),
-      );
-    }, 50);
+    panel.schedule();
+    panel.reveal(wt.path);
   };
 
-  // Accordion: opening a worktree closes the others. The tree API can't collapse a single row, so
-  // collapse everything and re-open the one that was just expanded (plus its groups).
-  const expanded = new Set();
-  let accordionBusy = false;
-  view.onDidCollapseElement((e) => e.element.kind === 'worktree' && expanded.delete(e.element.id));
-  view.onDidExpandElement(async (e) => {
-    const n = e.element;
-    if (n.kind !== 'worktree' || accordionBusy) return;
-    const others = [...expanded].some((id) => id !== n.id);
-    expanded.add(n.id);
-    if (!others) return;
-    accordionBusy = true;
-    try {
-      await vscode.commands.executeCommand('workbench.actions.treeView.agentDeck.worktrees.collapseAll');
-      expanded.clear();
-      await view.reveal(n, { expand: 2, select: false, focus: false });
-      expanded.add(n.id);
-    } finally {
-      accordionBusy = false;
-    }
-  });
-
-  // Selecting a worktree row (mouse or arrow keys) switches to its terminal without taking focus
-  // from the tree; the click itself toggles the dropdown.
-  let revealing = false;
-  view.onDidChangeSelection((e) => {
-    if (revealing || e.selection.length !== 1) return;
-    const n = e.selection[0];
-    if (n.kind === 'worktree') deck.switchTo(n.wt.path, { preserveFocus: true });
-  });
+  // Clicking a worktree card opens it (the panel closes the others) and brings its terminal
+  // forward without taking focus away from the panel.
+  panel.onSelect((p) => deck.switchTo(p, { preserveFocus: true }));
 
   // Poll processes + git status while the window is focused; agents edit files and cd around
   // without telling us.
@@ -1463,23 +1300,29 @@ function activate(ctx) {
     return pick?.repo;
   };
 
-  /** Accepts a tree node, a path string, or nothing (falls back to the active worktree). */
+  /**
+   * Commands get a path string (keybindings, tests), a `{ wtPath, … }` object from the panel or its
+   * context menus, or nothing, which means the active worktree.
+   */
   const resolveWt = (arg) => {
     if (typeof arg === 'string') return deck.findWorktree(arg);
-    if (arg && 'wt' in arg && arg.wt) return arg.wt;
-    if (arg?.kind === 'terminal') return deck.findWorktree(arg.wtPath);
-    if (arg?.kind === 'repo') return undefined;
+    if (arg?.wtPath) return deck.findWorktree(arg.wtPath);
+    if (arg?.termId) {
+      const t = panel.terminalById(arg.termId);
+      return t && deck.worktreeOf(t);
+    }
     return deck.active ? deck.findWorktree(deck.active) : undefined;
   };
 
-  /** Runs a git command on one changed file, or on every file of a Changes / Staged group. */
-  const gitOnFiles = async (n, argsFor) => {
-    if (!n) return;
-    const files = n.kind === 'change' ? [n.change] : deck.changesOf(n.wt.path, n.group);
+  /** Runs a git command on one changed file (`arg.path`), or on every file of `arg.group`. */
+  const gitOnFiles = async (arg, argsFor) => {
+    const wt = arg && resolveWt(arg);
+    if (!wt) return;
+    const files = arg.path ? [{ path: arg.path, orig: arg.orig }] : deck.changesOf(wt.path, arg.group);
     const paths = files.flatMap((c) => (c.orig ? [c.orig, c.path] : [c.path]));
     if (!paths.length) return;
     try {
-      await git(n.wt.path, argsFor(paths));
+      await git(wt.path, argsFor(paths));
     } catch (e) {
       vscode.window.showErrorMessage(`Agent Deck: ${e.message}`);
     }
@@ -1495,32 +1338,29 @@ function activate(ctx) {
   };
 
   ctx.subscriptions.push(
-    view,
+    vscode.window.registerWebviewViewProvider('agentDeck.worktrees', panel, { webviewOptions: { retainContextWhenHidden: true } }),
     filesView,
     status,
     { dispose: () => clearInterval(timer) },
     { dispose: () => deck.gitWatchers.forEach((w) => w.dispose()) },
     { dispose: () => files.watcher?.dispose() },
     vscode.workspace.registerTextDocumentContentProvider(GIT_SCHEME, new GitContent()),
-    vscode.window.registerFileDecorationProvider(new Decorations()),
 
     vscode.window.onDidChangeActiveTerminal(syncFromTerminal),
     vscode.window.onDidOpenTerminal(() => {
       deck.adoptTerminals();
       setTimeout(() => deck.poll(), 1500);
-      tree._onDidChange.fire(undefined);
+      panel.schedule();
     }),
     vscode.window.onDidCloseTerminal((t) => {
-      const id = tree.termIds.get(t);
-      if (id) tree.nodes.delete(`term:${id}`);
-      tree.termIds.delete(t);
+      panel.termIds.delete(t);
       deck.forgetTerminal(t);
     }),
-    vscode.window.onDidChangeTerminalShellIntegration(() => tree._onDidChange.fire(undefined)),
+    vscode.window.onDidChangeTerminalShellIntegration(() => panel.schedule()),
     vscode.window.onDidStartTerminalShellExecution((e) => {
       deck.busy.set(e.terminal, (deck.busy.get(e.terminal) ?? 0) + 1);
       lastCommand.set(e.terminal, e.execution.commandLine.value.split(/\s+/)[0] || '');
-      tree._onDidChange.fire(undefined);
+      panel.schedule();
       setTimeout(() => deck.poll(), 1500);
     }),
     vscode.window.onDidEndTerminalShellExecution((e) => {
@@ -1530,7 +1370,6 @@ function activate(ctx) {
     vscode.window.onDidChangeWindowState((s) => s.focused && deck.refresh()),
     vscode.workspace.onDidChangeWorkspaceFolders(() => deck.refresh()),
     vscode.workspace.onDidChangeConfiguration((e) => e.affectsConfiguration('files.exclude') && files.refresh()),
-    view.onDidChangeVisibility((e) => e.visible && syncFromTerminal(vscode.window.activeTerminal)),
 
     vscode.commands.registerCommand('agentDeck.refresh', () => deck.refresh()),
     vscode.commands.registerCommand('agentDeck.refreshFiles', () => files.refresh()),
@@ -1546,10 +1385,15 @@ function activate(ctx) {
     vscode.commands.registerCommand('agentDeck.nextWorktree', () => cycle(1)),
     vscode.commands.registerCommand('agentDeck.prevWorktree', () => cycle(-1)),
 
-    vscode.commands.registerCommand('agentDeck.showTerminal', (/** @type {TerminalNode} */ n) => {
-      deck.lastTerminal.set(n.wtPath, n.terminal);
-      deck.setActive(n.wtPath);
-      n.terminal.show(false);
+    vscode.commands.registerCommand('agentDeck.showTerminal', (arg) => {
+      const t = arg?.termId && panel.terminalById(arg.termId);
+      if (!t) return;
+      const wt = deck.worktreeOf(t);
+      if (wt) {
+        deck.lastTerminal.set(wt.path, t);
+        deck.setActive(wt.path);
+      }
+      t.show(false);
     }),
     vscode.commands.registerCommand('agentDeck.newTerminal', async (arg) => {
       const wt = resolveWt(arg) ?? (await pickWorktree('New terminal in…'));
@@ -1557,20 +1401,24 @@ function activate(ctx) {
       deck.setActive(wt.path);
       deck.createTerminal(wt);
     }),
-    vscode.commands.registerCommand('agentDeck.killTerminal', (/** @type {TerminalNode} */ n) => n?.terminal.dispose()),
-    vscode.commands.registerCommand('agentDeck.renameTerminal', async (/** @type {TerminalNode} */ n) => {
-      if (!n) return;
-      const name = await vscode.window.showInputBox({ prompt: 'Terminal name', value: deck.displayName(n.terminal) });
+    vscode.commands.registerCommand('agentDeck.killTerminal', (arg) => panel.terminalById(arg?.termId)?.dispose()),
+    vscode.commands.registerCommand('agentDeck.renameTerminal', async (arg) => {
+      const t = panel.terminalById(arg?.termId);
+      if (!t) return;
+      const name = await vscode.window.showInputBox({ prompt: 'Terminal name', value: deck.displayName(t) });
       if (!name) return;
-      n.terminal.show(true);
+      t.show(true);
       await vscode.commands.executeCommand('workbench.action.terminal.renameWithArg', { name });
-      deck.names.set(n.terminal, name);
+      deck.names.set(t, name);
       deck.saveLinks();
-      tree._onDidChange.fire(undefined);
+      panel.schedule();
     }),
 
-    vscode.commands.registerCommand('agentDeck.openChange', (/** @type {ChangeNode} */ n) => {
-      const { wt, change: c, group } = n;
+    vscode.commands.registerCommand('agentDeck.openChange', (arg) => {
+      const wt = resolveWt(arg);
+      if (!wt || !arg.path) return;
+      const group = arg.group;
+      const c = { path: arg.path, orig: arg.orig, code: arg.code ?? ' M' };
       const file = vscode.Uri.file(path.join(wt.path, c.path));
       const name = path.basename(c.path);
       if (c.code === '??') return vscode.commands.executeCommand('vscode.open', file);
@@ -1583,18 +1431,15 @@ function activate(ctx) {
       const right = deletedHere ? gitUri(wt.path, c.path, '') : rRef ? gitUri(wt.path, c.path, rRef) : file;
       return vscode.commands.executeCommand('vscode.diff', left, right, `${name} (${wtLabel(wt)} · ${title})`);
     }),
-    vscode.commands.registerCommand('agentDeck.openChangedFile', (/** @type {ChangeNode} */ n) => {
-      if (n?.kind === 'change') vscode.commands.executeCommand('vscode.open', vscode.Uri.file(path.join(n.wt.path, n.change.path)));
+    vscode.commands.registerCommand('agentDeck.openChangedFile', (arg) => {
+      const wt = resolveWt(arg);
+      if (wt && arg?.path) vscode.commands.executeCommand('vscode.open', vscode.Uri.file(path.join(wt.path, arg.path)));
     }),
-    vscode.commands.registerCommand('agentDeck.stage', (/** @type {ChangeNode | GroupNode} */ n) =>
-      gitOnFiles(n, (paths) => ['add', '-A', '--', ...paths]),
-    ),
-    vscode.commands.registerCommand('agentDeck.unstage', (/** @type {ChangeNode | GroupNode} */ n) =>
-      gitOnFiles(n, (paths) => ['restore', '--staged', '--', ...paths]),
-    ),
+    vscode.commands.registerCommand('agentDeck.stage', (arg) => gitOnFiles(arg, (paths) => ['add', '-A', '--', ...paths])),
+    vscode.commands.registerCommand('agentDeck.unstage', (arg) => gitOnFiles(arg, (paths) => ['restore', '--staged', '--', ...paths])),
 
     vscode.commands.registerCommand('agentDeck.newWorktree', async (arg) => {
-      const repo = arg?.kind === 'repo' ? arg.repo : arg?.kind === 'worktree' ? arg.wt.repo : await pickRepo();
+      const repo = (arg?.wtPath && deck.findWorktree(arg.wtPath)?.repo) ?? (await pickRepo());
       if (!repo) return;
       const branch = await vscode.window.showInputBox({
         prompt: `New worktree in ${repo.name}: branch name (existing branches are checked out, new ones branch off the main checkout's HEAD)`,
@@ -1688,19 +1533,6 @@ function activate(ctx) {
       await ctx.globalState.update('agentDeck.repos', [...pinned]);
       deck.refresh();
     }),
-    vscode.commands.registerCommand('agentDeck.removeRepository', async (/** @type {RepoNode} */ n) => {
-      if (!n) return;
-      const pinned = ctx.globalState.get('agentDeck.repos', /** @type {string[]} */ ([]));
-      const keep = [];
-      for (const p of pinned) if ((await commonDirOf(p)) !== n.repo.commonDir) keep.push(p);
-      if (keep.length === pinned.length) {
-        vscode.window.showInformationMessage('Agent Deck: this repository is part of the open workspace; remove the folder from the workspace instead.');
-        return;
-      }
-      await ctx.globalState.update('agentDeck.repos', keep);
-      deck.refresh();
-    }),
-
     vscode.commands.registerCommand('agentDeck.openInNewWindow', (arg) => {
       const wt = resolveWt(arg);
       if (wt) vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(wt.path), { forceNewWindow: true });
@@ -1714,13 +1546,13 @@ function activate(ctx) {
       const url = wt && (deck.prs.get(wt.path) ?? [])[0]?.url;
       if (url) vscode.env.openExternal(vscode.Uri.parse(url));
     }),
-    vscode.commands.registerCommand('agentDeck.openPrLink', (/** @type {PrNode} */ n) => {
-      if (n?.pr.url) vscode.env.openExternal(vscode.Uri.parse(n.pr.url));
+    vscode.commands.registerCommand('agentDeck.openPrLink', (arg) => {
+      if (arg?.url) vscode.env.openExternal(vscode.Uri.parse(arg.url));
     }),
-    vscode.commands.registerCommand('agentDeck.copyPrLink', (/** @type {PrNode} */ n) => {
-      if (n?.pr.url) vscode.env.clipboard.writeText(n.pr.url);
+    vscode.commands.registerCommand('agentDeck.copyPrLink', (arg) => {
+      if (arg?.url) vscode.env.clipboard.writeText(arg.url);
     }),
-    vscode.workspace.onDidChangeConfiguration((e) => e.affectsConfiguration('agentDeck.worktreeLabel') && tree._onDidChange.fire(undefined)),
+    vscode.workspace.onDidChangeConfiguration((e) => e.affectsConfiguration('agentDeck.worktreeLabel') && panel.schedule()),
     vscode.commands.registerCommand('agentDeck.copyPath', (arg) => {
       const wt = resolveWt(arg);
       if (wt) vscode.env.clipboard.writeText(wt.path);
@@ -1740,7 +1572,7 @@ function activate(ctx) {
     }
   });
 
-  return { deck, tree, view, decorations: new Decorations() };
+  return { deck, panel, model: () => panel.model() };
 }
 
 function deactivate() {}

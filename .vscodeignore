@@ -1,3 +1,5 @@
 test/**
+scripts/**
 .git/**
 *.vsix
+docs-icon-options.html

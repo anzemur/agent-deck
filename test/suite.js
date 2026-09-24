@@ -19,6 +19,10 @@ exports.run = async function () {
   const ext = vscode.extensions.getExtension('anzemur.agent-deck');
   const { deck } = await ext.activate();
   globalDeck = deck;
+  const model = () => ext.exports.model();
+  const wtModel = (w) => model().worktrees.find((x) => x.path === w.path);
+  const panel = ext.exports.panel;
+  await vscode.commands.executeCommand('agentDeck.worktrees.focus');
   await until(() => deck.worktrees.length === 3, '3 worktrees');
   const names = deck.worktrees.map((w) => w.branch).sort();
   assert.deepStrictEqual(names, ['feat-a', 'feat-b', 'main']);
@@ -49,12 +53,14 @@ exports.run = async function () {
 
   // Tree structure: worktree -> [No changes, Terminals]; changes come first.
   {
-    const { tree } = ext.exports;
-    const secs = (await tree.getChildren(tree.wtNode(a))).map((n) => tree.getTreeItem(n).label);
-    assert.deepStrictEqual(secs, ['No changes', 'Terminals', 'Pull Requests']);
-    const terms = await tree.getChildren(tree.sectionNode(a, 'terminals'));
-    assert.deepStrictEqual(terms.map((n) => tree.getTreeItem(n).label), ['feat-a']);
+    const secs = wtModel(a).sections;
+    assert.deepStrictEqual(secs.map((s) => s.kind), ['clean', 'terminals', 'prs']);
+    assert.deepStrictEqual(secs[1].terminals.map((t) => t.name), ['feat-a']);
     console.log('✓ worktree dropdown = [No changes, Terminals (feat-a), Pull Requests]');
+    // The webview really draws it: all worktrees as cards, the active one open.
+    await until(() => panel.lastRender?.worktrees === deck.worktrees.length && panel.lastRender.open === a.path, 'panel rendered', 15000);
+    assert.ok(panel.lastRender.openRows.includes('feat-a'), JSON.stringify(panel.lastRender.openRows));
+    console.log(`✓ panel webview rendered ${panel.lastRender.worktrees} worktree cards, feat-a open with its terminal row`);
   }
 
   // Focus terminal B directly (like clicking its tab) -> active worktree follows.
@@ -134,13 +140,18 @@ exports.run = async function () {
   assert.strictEqual(deck.changesOf(b.path, 'unstaged').length, 0);
   console.log('✓ feat-a: Staged = [staged.txt], Changes = [README.md, new.txt]; feat-b clean');
 
-  const { tree } = ext.exports;
-  const kids = await tree.getChildren(tree.wtNode(a));
-  assert.deepStrictEqual(kids.map((k) => tree.getTreeItem(k).label), ['Staged Changes', 'Changes', 'Terminals', 'Pull Requests']);
+  const kids = wtModel(a).sections;
+  assert.deepStrictEqual(kids.map((k) => k.title ?? k.kind), ['Staged Changes', 'Changes', 'terminals', 'prs']);
   console.log('✓ feat-a dropdown = [Staged Changes, Changes, Terminals, Pull Requests] (changes on top)');
+  const readme = kids[1].files.find((f) => f.path === 'README.md');
+  // Seti gives README files their own (info) icon and other .md files the markdown one.
+  assert.deepStrictEqual([readme.letter, readme.seti[0]], ['M', 'E04D']);
+  const newTxt = kids[1].files.find((f) => f.path === 'new.txt');
+  assert.strictEqual(newTxt.letter, 'U');
+  console.log('✓ file rows: README.md = M with Seti README icon, new.txt = U');
 
   // Stage README via the command, then check the index diff content provider.
-  const readmeNode = (await tree.getChildren(kids.find((k) => k.group === 'unstaged'))).find((n) => n.change.path === 'README.md');
+  const readmeNode = { wtPath: a.path, group: 'unstaged', path: 'README.md' };
   await vscode.commands.executeCommand('agentDeck.stage', readmeNode);
   await until(() => deck.changesOf(a.path, 'staged').some((c) => c.path === 'README.md'), 'README staged');
   const idx = await vscode.workspace.openTextDocument(vscode.Uri.from({ scheme: 'agentdeck-git', path: path.join(a.path, 'README.md'), query: JSON.stringify({ cwd: a.path, ref: ':' }) }));
@@ -154,7 +165,6 @@ exports.run = async function () {
 
   // Worktree label follows the Claude session title; /rename wins; PR number shows.
   {
-    const { tree } = ext.exports;
     const fsx = require('fs');
     const dir = path.join(process.env.AGENT_DECK_CLAUDE_PROJECTS, b.path.replace(/[^a-zA-Z0-9]/g, '-'));
     fsx.mkdirSync(dir, { recursive: true });
@@ -166,39 +176,34 @@ exports.run = async function () {
       { type: 'pr-link', prNumber: 42, prUrl: 'https://example.com/pr/42' },
     ].map((o) => JSON.stringify(o)).join('\n') + '\n');
     await deck.poll();
-    let item = tree.getTreeItem(tree.wtNode(b));
-    assert.strictEqual(item.label, 'Fix login redirect');
-    assert.match(item.description, /feat-b/);
-    console.log(`✓ worktree feat-b labelled "${item.label}" (${item.description})`);
+    let item = wtModel(b);
+    assert.strictEqual(item.title, 'Fix login redirect');
+    assert.strictEqual(item.branch, 'feat-b');
+    console.log(`✓ worktree feat-b labelled "${item.title}" (branch ${item.branch})`);
     await until(async () => (deck.prs.get(b.path) ?? []).some((p) => p.number === 42), 'PR from session', 15000);
-    const prSection = tree.sectionNode(b, 'prs');
-    assert.strictEqual(tree.getTreeItem(prSection).label, 'Pull Requests');
-    const prRows = (await tree.getChildren(prSection)).map((n) => tree.getTreeItem(n));
-    assert.strictEqual(prRows[0].label, '#42');
-    assert.match(String(prRows[0].description), /from session/);
-    assert.strictEqual(prRows[0].command.command, 'agentDeck.openPrLink');
-    const order = (await tree.getChildren(tree.wtNode(b))).map((n) => tree.getTreeItem(n).label);
-    assert.deepStrictEqual(order.slice(-2), ['Terminals', 'Pull Requests']);
-    console.log('✓ Pull Requests section after Terminals lists #42 (linked in session), click opens link');
+    const secsB = wtModel(b).sections;
+    assert.deepStrictEqual(secsB.slice(-2).map((s) => s.kind), ['terminals', 'prs']);
+    const pr = secsB.at(-1).prs[0];
+    assert.strictEqual(pr.number, 42);
+    assert.match(pr.sub, /from session/);
+    assert.strictEqual(pr.url, 'https://example.com/pr/42');
+    console.log('✓ Pull Requests section after Terminals lists #42 (linked in session) with its link');
 
     // Active worktree: coloured name + ● badge; header shows its name.
     await vscode.commands.executeCommand('agentDeck.selectWorktree', b.path);
-    const { decorations, view } = ext.exports;
-    const decoB = decorations.provideFileDecoration(tree.getTreeItem(tree.wtNode(b)).resourceUri);
-    const decoA = decorations.provideFileDecoration(tree.getTreeItem(tree.wtNode(a)).resourceUri);
-    assert.ok(decoB.color, 'active worktree has a colour');
-    assert.match(decoB.badge, /^●/);
-    assert.ok(!decoA.color, 'inactive worktree is not coloured');
-    assert.ok(!String(decoA.badge ?? '').includes('●'));
-    assert.strictEqual(view.description, 'Fix login redirect');
-    console.log(`✓ active worktree: coloured name, badge "${decoB.badge}", header "WORKTREES · ${view.description}"`);
+    const mb = wtModel(b), ma = wtModel(a);
+    assert.ok(mb.active && !ma.active);
+    assert.match(mb.colorVar, /--vscode-terminal-ansi/);
+    assert.match(mb.badge, /^●/);
+    assert.ok(!ma.badge.includes('●'));
+    await until(() => panel.view?.description === 'Fix login redirect', 'header shows active worktree');
+    console.log(`✓ active worktree: coloured name, badge "${mb.badge}", header "WORKTREES · ${panel.view.description}"`);
     await sleep(20);
     fsx.appendFileSync(file, JSON.stringify({ type: 'custom-title', customTitle: 'Login bug' }) + '\n');
     await deck.poll();
-    item = tree.getTreeItem(tree.wtNode(b));
-    assert.strictEqual(item.label, 'Login bug');
+    assert.strictEqual(wtModel(b).title, 'Login bug');
     console.log('✓ /rename title overrides the AI title');
-    assert.strictEqual(tree.getTreeItem(tree.wtNode(a)).label, 'feat-a');
+    assert.strictEqual(wtModel(a).title, 'feat-a');
     console.log('✓ worktree without a session keeps its branch name');
   }
 

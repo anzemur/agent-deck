@@ -34,7 +34,8 @@
       "agentDeck": [
         {
           "id": "agentDeck.worktrees",
-          "name": "Worktrees"
+          "name": "Worktrees",
+          "type": "webview"
         },
         {
           "id": "agentDeck.files",
@@ -42,12 +43,6 @@
         }
       ]
     },
-    "viewsWelcome": [
-      {
-        "view": "agentDeck.worktrees",
-        "contents": "No git repositories found in this window.\n[Add Repository](command:agentDeck.addRepository)"
-      }
-    ],
     "commands": [
       {
         "command": "agentDeck.refresh",
@@ -59,11 +54,6 @@
         "command": "agentDeck.addRepository",
         "title": "Add Repository\u2026",
         "icon": "$(repo-create)",
-        "category": "Agent Deck"
-      },
-      {
-        "command": "agentDeck.removeRepository",
-        "title": "Remove Repository from Deck",
         "category": "Agent Deck"
       },
       {
@@ -215,148 +205,6 @@
           "group": "navigation@2"
         }
       ],
-      "view/item/context": [
-        {
-          "command": "agentDeck.newWorktree",
-          "when": "view == agentDeck.worktrees && viewItem == repo",
-          "group": "inline"
-        },
-        {
-          "command": "agentDeck.newWorktree",
-          "when": "view == agentDeck.worktrees && viewItem == repo",
-          "group": "1_main@1"
-        },
-        {
-          "command": "agentDeck.removeRepository",
-          "when": "view == agentDeck.worktrees && viewItem == repo",
-          "group": "9_danger@1"
-        },
-        {
-          "command": "agentDeck.newTerminal",
-          "when": "view == agentDeck.worktrees && viewItem =~ /^worktree/",
-          "group": "inline@1"
-        },
-        {
-          "command": "agentDeck.openInNewWindow",
-          "when": "view == agentDeck.worktrees && viewItem =~ /^worktree/",
-          "group": "inline@2"
-        },
-        {
-          "command": "agentDeck.newTerminal",
-          "when": "view == agentDeck.worktrees && viewItem =~ /^worktree/",
-          "group": "1_main@1"
-        },
-        {
-          "command": "agentDeck.openInNewWindow",
-          "when": "view == agentDeck.worktrees && viewItem =~ /^worktree/",
-          "group": "1_main@2"
-        },
-        {
-          "command": "agentDeck.revealInFinder",
-          "when": "view == agentDeck.worktrees && viewItem =~ /^worktree/",
-          "group": "2_path@1"
-        },
-        {
-          "command": "agentDeck.copyPath",
-          "when": "view == agentDeck.worktrees && viewItem =~ /^worktree/",
-          "group": "2_path@2"
-        },
-        {
-          "command": "agentDeck.removeWorktree",
-          "when": "view == agentDeck.worktrees && viewItem =~ /^worktree( |$)/",
-          "group": "9_danger@1"
-        },
-        {
-          "command": "agentDeck.renameTerminal",
-          "when": "view == agentDeck.worktrees && viewItem == terminal",
-          "group": "inline@1"
-        },
-        {
-          "command": "agentDeck.killTerminal",
-          "when": "view == agentDeck.worktrees && viewItem == terminal",
-          "group": "inline@2"
-        },
-        {
-          "command": "agentDeck.renameTerminal",
-          "when": "view == agentDeck.worktrees && viewItem == terminal",
-          "group": "1_main@1"
-        },
-        {
-          "command": "agentDeck.killTerminal",
-          "when": "view == agentDeck.worktrees && viewItem == terminal",
-          "group": "9_danger@1"
-        },
-        {
-          "command": "agentDeck.openChangedFile",
-          "when": "view == agentDeck.worktrees && viewItem =~ /^(stagedC|c)hange$/",
-          "group": "inline@1"
-        },
-        {
-          "command": "agentDeck.stage",
-          "when": "view == agentDeck.worktrees && viewItem == change",
-          "group": "inline@2"
-        },
-        {
-          "command": "agentDeck.unstage",
-          "when": "view == agentDeck.worktrees && viewItem == stagedChange",
-          "group": "inline@2"
-        },
-        {
-          "command": "agentDeck.stage",
-          "when": "view == agentDeck.worktrees && viewItem == changesGroup",
-          "group": "inline@1"
-        },
-        {
-          "command": "agentDeck.unstage",
-          "when": "view == agentDeck.worktrees && viewItem == stagedGroup",
-          "group": "inline@1"
-        },
-        {
-          "command": "agentDeck.openChange",
-          "when": "view == agentDeck.worktrees && viewItem =~ /^(stagedC|c)hange$/",
-          "group": "1_main@1"
-        },
-        {
-          "command": "agentDeck.openChangedFile",
-          "when": "view == agentDeck.worktrees && viewItem =~ /^(stagedC|c)hange$/",
-          "group": "1_main@2"
-        },
-        {
-          "command": "agentDeck.stage",
-          "when": "view == agentDeck.worktrees && viewItem =~ /^(change|changesGroup)$/",
-          "group": "2_git@1"
-        },
-        {
-          "command": "agentDeck.unstage",
-          "when": "view == agentDeck.worktrees && viewItem =~ /^(stagedChange|stagedGroup)$/",
-          "group": "2_git@1"
-        },
-        {
-          "command": "agentDeck.newTerminal",
-          "when": "view == agentDeck.worktrees && viewItem == terminalsSection",
-          "group": "inline@1"
-        },
-        {
-          "command": "agentDeck.openPr",
-          "when": "view == agentDeck.worktrees && viewItem =~ /hasPr/",
-          "group": "1_main@3"
-        },
-        {
-          "command": "agentDeck.copyPrLink",
-          "when": "view == agentDeck.worktrees && viewItem == pr",
-          "group": "inline@1"
-        },
-        {
-          "command": "agentDeck.openPrLink",
-          "when": "view == agentDeck.worktrees && viewItem == pr",
-          "group": "1_main@1"
-        },
-        {
-          "command": "agentDeck.copyPrLink",
-          "when": "view == agentDeck.worktrees && viewItem == pr",
-          "group": "1_main@2"
-        }
-      ],
       "commandPalette": [
         {
           "command": "agentDeck.selectWorktree",
@@ -375,10 +223,6 @@
           "when": "false"
         },
         {
-          "command": "agentDeck.removeRepository",
-          "when": "false"
-        },
-        {
           "command": "agentDeck.revealInFinder",
           "when": "false"
         },
@@ -413,6 +257,93 @@
         {
           "command": "agentDeck.copyPrLink",
           "when": "false"
+        }
+      ],
+      "webview/context": [
+        {
+          "command": "agentDeck.newTerminal",
+          "when": "webviewId == 'agentDeck.worktrees' && webviewSection == 'worktree'",
+          "group": "1_main@1"
+        },
+        {
+          "command": "agentDeck.openInNewWindow",
+          "when": "webviewId == 'agentDeck.worktrees' && webviewSection == 'worktree'",
+          "group": "1_main@2"
+        },
+        {
+          "command": "agentDeck.openPr",
+          "when": "webviewId == 'agentDeck.worktrees' && webviewSection == 'worktree' && hasPr",
+          "group": "1_main@3"
+        },
+        {
+          "command": "agentDeck.newWorktree",
+          "when": "webviewId == 'agentDeck.worktrees' && webviewSection == 'worktree'",
+          "group": "1_main@4"
+        },
+        {
+          "command": "agentDeck.revealInFinder",
+          "when": "webviewId == 'agentDeck.worktrees' && webviewSection == 'worktree'",
+          "group": "2_path@1"
+        },
+        {
+          "command": "agentDeck.copyPath",
+          "when": "webviewId == 'agentDeck.worktrees' && webviewSection == 'worktree'",
+          "group": "2_path@2"
+        },
+        {
+          "command": "agentDeck.removeWorktree",
+          "when": "webviewId == 'agentDeck.worktrees' && webviewSection == 'worktree' && !isMain",
+          "group": "9_danger@1"
+        },
+        {
+          "command": "agentDeck.renameTerminal",
+          "when": "webviewId == 'agentDeck.worktrees' && webviewSection == 'terminal'",
+          "group": "1_main@1"
+        },
+        {
+          "command": "agentDeck.killTerminal",
+          "when": "webviewId == 'agentDeck.worktrees' && webviewSection == 'terminal'",
+          "group": "9_danger@1"
+        },
+        {
+          "command": "agentDeck.openChange",
+          "when": "webviewId == 'agentDeck.worktrees' && webviewSection == 'change'",
+          "group": "1_main@1"
+        },
+        {
+          "command": "agentDeck.openChangedFile",
+          "when": "webviewId == 'agentDeck.worktrees' && webviewSection == 'change'",
+          "group": "1_main@2"
+        },
+        {
+          "command": "agentDeck.stage",
+          "when": "webviewId == 'agentDeck.worktrees' && webviewSection == 'change'",
+          "group": "2_git@1"
+        },
+        {
+          "command": "agentDeck.openChange",
+          "when": "webviewId == 'agentDeck.worktrees' && webviewSection == 'stagedChange'",
+          "group": "1_main@1"
+        },
+        {
+          "command": "agentDeck.openChangedFile",
+          "when": "webviewId == 'agentDeck.worktrees' && webviewSection == 'stagedChange'",
+          "group": "1_main@2"
+        },
+        {
+          "command": "agentDeck.unstage",
+          "when": "webviewId == 'agentDeck.worktrees' && webviewSection == 'stagedChange'",
+          "group": "2_git@1"
+        },
+        {
+          "command": "agentDeck.openPrLink",
+          "when": "webviewId == 'agentDeck.worktrees' && webviewSection == 'pr'",
+          "group": "1_main@1"
+        },
+        {
+          "command": "agentDeck.copyPrLink",
+          "when": "webviewId == 'agentDeck.worktrees' && webviewSection == 'pr'",
+          "group": "1_main@2"
         }
       ]
     },
