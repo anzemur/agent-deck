@@ -192,6 +192,12 @@
         "title": "Refresh Terminals (resume idle agents)",
         "icon": "$(debug-restart)",
         "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.nextAttention",
+        "title": "Go to Agent That Needs You",
+        "icon": "$(bell-dot)",
+        "category": "Agent Deck"
       }
     ],
     "menus": {
@@ -385,6 +391,11 @@
         "key": "cmd+shift+f",
         "mac": "cmd+shift+f",
         "when": "config.agentDeck.scopeSearch"
+      },
+      {
+        "command": "agentDeck.nextAttention",
+        "key": "cmd+alt+n",
+        "mac": "cmd+alt+n"
       }
     ],
     "configuration": {
@@ -436,6 +447,16 @@
           "type": "boolean",
           "default": true,
           "description": "Show the Agent Deck sidebar when the window opens or reloads."
+        },
+        "agentDeck.notifications": {
+          "type": "boolean",
+          "default": true,
+          "description": "Notify when an agent finishes or needs your input (permission, question) in a terminal you're not looking at."
+        },
+        "agentDeck.macNotifications": {
+          "type": "boolean",
+          "default": true,
+          "description": "Also show a macOS notification (with sound) when Cursor/VS Code isn't the front app."
         }
       }
     }

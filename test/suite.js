@@ -261,6 +261,52 @@ exports.run = async function () {
     assert.strictEqual(await deck.resumeAgents(), 0);
     console.log('✓ a session that is still alive is not resumed twice');
 
+    // "Needs you": an agent that finishes (busy → idle) or asks something (waiting) in a terminal
+    // you're not looking at raises an alert once, shows on its card, counts in the badge, and
+    // clears when you jump to it.
+    {
+      const events = [];
+      const sub = deck.onAttention((e) => events.push(e));
+      const pidFile = path.join(process.env.AGENT_DECK_CLAUDE_SESSIONS, `${pid}.json`);
+      const write = (status, extra = {}) =>
+        fsx.writeFileSync(pidFile, JSON.stringify({ pid: Number(pid), sessionId: 'sess-b', status, statusUpdatedAt: Date.now(), ...extra }));
+      const elsewhere = vscode.window.createTerminal({ name: 'elsewhere', cwd: a.path });
+      elsewhere.show();
+      await sleep(800);
+      write('busy');
+      await deck.poll();
+      assert.strictEqual(deck.attentionOf(term), undefined);
+      await sleep(20);
+      write('idle');
+      await deck.poll();
+      assert.strictEqual(deck.attentionOf(term)?.kind, 'done');
+      assert.strictEqual(events.at(-1)?.attention.kind, 'done');
+      assert.strictEqual(wtModel(b).state, 'attention');
+      assert.match(wtModel(b).meta[0].text, /^done · now$/);
+      ext.exports.updateBadge();
+      assert.ok((panel.view.badge?.value ?? 0) >= 1);
+      console.log(`✓ agent finished while you looked elsewhere → alert "done", card "${wtModel(b).meta[0].text}", badge ${panel.view.badge.value}`);
+      const before = events.length;
+      await deck.poll();
+      assert.strictEqual(events.length, before);
+      console.log('✓ the same episode alerts only once');
+      await sleep(20);
+      write('waiting', { waitingFor: 'permission prompt' }); // what real Claude writes (checked)
+      await deck.poll();
+      assert.deepStrictEqual([deck.attentionOf(term)?.kind, deck.attentionOf(term)?.reason], ['waiting', 'permission prompt']);
+      assert.match(wtModel(b).meta[0].text, /^needs approval · /);
+      console.log(`✓ permission prompt → "${wtModel(b).meta[0].text}"`);
+      await vscode.commands.executeCommand('agentDeck.nextAttention');
+      await until(() => vscode.window.activeTerminal === term, 'jumped to the agent');
+      write('idle');
+      await deck.poll();
+      assert.strictEqual(deck.attentionOf(term), undefined);
+      ext.exports.updateBadge();
+      console.log('✓ "Go to agent that needs you" focuses it; once seen the alert clears');
+      sub.dispose();
+      elsewhere.dispose();
+    }
+
     // Refresh Terminals: idle Claude → resumed fresh; empty shell → reopened; busy → left alone.
     const oldPlain = vscode.window.createTerminal({ name: 'old-plain', cwd: a.path });
     const busy = vscode.window.createTerminal({ name: 'old-busy', cwd: a.path });

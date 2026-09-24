@@ -43,7 +43,8 @@ const COLORS = [
 /** @typedef {{ commonDir: string, root: string, name: string, pinned: boolean, worktrees: Worktree[] }} Repo */
 /** @typedef {{ code: string, path: string, orig?: string }} Change  code is the two-letter porcelain XY */
 /** @typedef {{ changes: Change[], ahead: number, behind: number, upstream: string | undefined }} WtStatus */
-/** @typedef {{ wtPath: string | undefined, fromChild: boolean, agent: string | undefined, working: boolean, sessionId: string | undefined, hasChildren: boolean }} ProcInfo */
+/** @typedef {{ wtPath: string | undefined, fromChild: boolean, agent: string | undefined, working: boolean, sessionId: string | undefined, hasChildren: boolean, status: string | undefined, waitingFor: string | undefined, statusSince: number | undefined }} ProcInfo */
+/** @typedef {{ kind: 'waiting' | 'done', since: number, reason: string | undefined }} Attention  agent needs you: blocked on a question/approval, or finished unseen work */
 /** @typedef {{ sessionId: string, wtPath: string, name: string }} AgentRecord  a Claude session to bring back after a restart */
 /** @typedef {{ title: string | undefined, prs: { number: number, url: string }[] }} SessionInfo */
 /** @typedef {{ number: number, url: string, title: string | undefined, state: string | undefined, isDraft: boolean, own: boolean }} PullRequest  own = this worktree's branch is its head */
@@ -225,7 +226,14 @@ async function scanTerminalProcesses(terminals, locate) {
       if (prev && now > prev.at) working = (cpu - prev.cpu) / ((now - prev.at) / 1000) >= WORKING_CPU;
       cpuSamples.set(agentPid, { cpu, at: now });
     }
-    result.set(t, { wtPath, fromChild, agent, working, sessionId: pidFile?.sessionId, hasChildren: children.length > 0 });
+    result.set(t, {
+      wtPath, fromChild, agent, working,
+      sessionId: pidFile?.sessionId,
+      hasChildren: children.length > 0,
+      status: pidFile?.status,
+      waitingFor: pidFile?.waitingFor,
+      statusSince: pidFile?.statusUpdatedAt,
+    });
   }
   return result;
 }
@@ -456,6 +464,27 @@ function wtTitle(wt, deck) {
   return (mode !== 'branch' && deck.sessions.get(wt.path)?.title) || wtLabel(wt);
 }
 
+/** "now", "4m", "2h", "3d". */
+function ago(ms) {
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  if (s < 60) return 'now';
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86400)}d`;
+}
+
+/** Short human label for what an agent needs, e.g. "needs you: approve Bash · 2m" or "done · 4m". */
+function attentionText(a) {
+  return `${attentionWhat(a)} · ${ago(a.since)}`;
+}
+
+/** Claude's own reasons ("permission prompt", "input needed", …) as short labels. */
+function attentionWhat(a) {
+  if (a.kind === 'done') return 'done';
+  const map = { 'permission prompt': 'needs approval', 'input needed': 'needs input', 'dialog open': 'needs you' };
+  return map[a.reason ?? ''] ?? `needs you${a.reason ? `: ${a.reason}` : ''}`;
+}
+
 function cwdOption(t) {
   const opts = /** @type {vscode.TerminalOptions} */ (t.creationOptions);
   const cwd = opts?.cwd;
@@ -552,6 +581,15 @@ class Deck {
     this.polling = false;
     this.lastPollSig = '';
     this.recordReady = false;
+    /** @type {Map<vscode.Terminal, number>} when you last looked at each terminal */
+    this.seenAt = new Map();
+    /** @type {Set<vscode.Terminal>} agents that worked (or asked something) since you last looked */
+    this.workedSinceSeen = new Set();
+    /** @type {Map<vscode.Terminal, string>} last alert sent per terminal, so each episode alerts once */
+    this.alerted = new Map();
+    this._onAttention = new vscode.EventEmitter();
+    /** Fires once per new "needs you" episode: { terminal, worktree, attention }. */
+    this.onAttention = this._onAttention.event;
     this.lastRecordJson = '';
 
     this._onChange = new vscode.EventEmitter();
@@ -640,38 +678,41 @@ class Deck {
    * Re-reads the cheap-but-changing state: which worktree each terminal's processes are in,
    * git status per worktree. Fires onChange only when something differs.
    */
-  poll(silent = false) {
+  /** `light`: only re-scan terminal processes (used while the window is in the background). */
+  poll(silent = false, { light = false } = {}) {
     // One poll at a time; a request during a poll gets a fresh one right after it, so callers
     // always see state read after they asked.
     if (this.pollRun) {
       this.pollNext ??= this.pollRun.then(() => {
         this.pollNext = undefined;
-        return this.poll(silent);
+        return this.poll(silent, { light });
       });
       return this.pollNext;
     }
-    this.pollRun = this._poll(silent).finally(() => (this.pollRun = undefined));
+    this.pollRun = this._poll(silent, light).finally(() => (this.pollRun = undefined));
     return this.pollRun;
   }
 
-  async _poll(silent) {
+  async _poll(silent, light) {
     this.polling = true;
     try {
       const terminals = [...vscode.window.terminals];
       const [procs, statuses] = await Promise.all([
         scanTerminalProcesses(terminals, (p) => this.worktreeContaining(p)).catch(() => new Map()),
-        Promise.all(this.worktrees.map(async (w) => /** @type {const} */ ([w.path, await readStatus(w.path)]))),
+        light ? undefined : Promise.all(this.worktrees.map(async (w) => /** @type {const} */ ([w.path, await readStatus(w.path)]))),
       ]);
       this.procs = procs;
       this.recordAgents();
-      this.status = new Map(statuses.filter(([, s]) => s).map(([p, s]) => [p, /** @type {WtStatus} */ (s)]));
-      this.sessions = new Map();
-      for (const w of this.worktrees) {
-        const info = readSessionInfo(w.path);
-        if (info) this.sessions.set(w.path, info);
+      this.trackAttention();
+      if (statuses) {
+        this.status = new Map(statuses.filter(([, s]) => s).map(([p, s]) => [p, /** @type {WtStatus} */ (s)]));
+        this.sessions = new Map();
+        for (const w of this.worktrees) {
+          const info = readSessionInfo(w.path);
+          if (info) this.sessions.set(w.path, info);
+        }
+        this.refreshPrs();
       }
-
-      this.refreshPrs();
       const sig = JSON.stringify([
         [...procs].map(([t, i]) => [this.names.get(t) ?? t.name, i]),
         [...this.status],
@@ -739,6 +780,53 @@ class Deck {
       }
     }
     return { plan, skipped };
+  }
+
+  // ------------------------------------------------------------ attention ("needs you")
+
+  /** You looked at this terminal: whatever it finished so far is no longer news. */
+  markSeen(t) {
+    if (!t) return;
+    this.seenAt.set(t, Date.now());
+    this.workedSinceSeen.delete(t);
+    if (this.alerted.delete(t)) this._onChange.fire();
+  }
+
+  /** @returns {Attention | undefined} */
+  attentionOf(t) {
+    const p = this.procs.get(t);
+    if (!p?.agent) return undefined;
+    const since = p.statusSince ?? Date.now();
+    if (p.status === 'waiting') return { kind: 'waiting', since, reason: p.waitingFor };
+    if (p.status === 'idle' && this.workedSinceSeen.has(t)) return { kind: 'done', since, reason: undefined };
+    return undefined;
+  }
+
+  /** Terminals whose agent needs you, most urgent (blocked) first, then oldest first. */
+  attentionList() {
+    return vscode.window.terminals
+      .map((t) => ({ t, a: this.attentionOf(t) }))
+      .filter((x) => x.a)
+      .sort((x, y) => Number(y.a?.kind === 'waiting') - Number(x.a?.kind === 'waiting') || (x.a?.since ?? 0) - (y.a?.since ?? 0));
+  }
+
+  trackAttention() {
+    const looking = vscode.window.state.focused ? vscode.window.activeTerminal : undefined;
+    for (const [t, p] of this.procs) {
+      if (p.status === 'busy' || p.status === 'waiting') this.workedSinceSeen.add(t);
+      // Watching it happen counts as seeing it.
+      if (t === looking && p.status !== 'waiting') this.markSeen(t);
+      const a = this.attentionOf(t);
+      if (!a) {
+        this.alerted.delete(t);
+        continue;
+      }
+      const key = `${a.kind}:${a.since}`;
+      if (this.alerted.get(t) === key) continue;
+      this.alerted.set(t, key);
+      const wt = this.worktreeOf(t);
+      if (wt && t !== looking) this._onAttention.fire({ terminal: t, worktree: wt, attention: a });
+    }
   }
 
   // ------------------------------------------------------------ resume after restart
@@ -964,6 +1052,9 @@ class Deck {
   }
 
   forgetTerminal(t) {
+    this.seenAt.delete(t);
+    this.workedSinceSeen.delete(t);
+    this.alerted.delete(t);
     const p = this.links.get(t);
     this.links.delete(t);
     this.names.delete(t);
@@ -1038,6 +1129,11 @@ function buildModel(deck, termId) {
     const st = deck.status.get(wt.path);
     const working = terms.some((t) => deck.isWorking(t));
     const idle = !working && terms.some((t) => deck.isIdleAgent(t));
+    // Most urgent thing any of its agents needs from you.
+    const attention = terms
+      .map((t) => deck.attentionOf(t))
+      .filter(Boolean)
+      .sort((x, y) => Number(y?.kind === 'waiting') - Number(x?.kind === 'waiting') || (x?.since ?? 0) - (y?.since ?? 0))[0];
     const prs = deck.prs.get(wt.path) ?? [];
     const ownPr = prs.find((p) => p.own);
     const title = wtTitle(wt, deck);
@@ -1045,7 +1141,9 @@ function buildModel(deck, termId) {
     const n = st?.changes.length ?? 0;
 
     /** @type {{ icon?: string, text: string }[]} */
-    const meta = [{ icon: 'git-branch', text: wtLabel(wt) }];
+    const meta = [];
+    if (attention) meta.push({ icon: 'bell', text: attentionText(attention), cls: 'attn' });
+    meta.push({ icon: 'git-branch', text: wtLabel(wt) });
     if (ownPr) meta.push({ icon: 'git-pull-request', text: `#${ownPr.number}` });
     if (st?.ahead || st?.behind) meta.push({ text: `${st.ahead ? `↑${st.ahead}` : ''}${st.behind ? ` ↓${st.behind}` : ''}`.trim() });
     if (wt.locked) meta.push({ text: 'locked' });
@@ -1077,12 +1175,16 @@ function buildModel(deck, termId) {
       terminals: terms.map((t) => {
         const proc = deck.procs.get(t);
         const cmd = deck.isRunningCommand(t);
+        const att = deck.attentionOf(t);
         return {
           id: termId(t),
           name: deck.displayName(t),
-          icon: proc?.working ? 'loading' : proc?.agent ? 'sparkle' : cmd ? 'play-circle' : 'terminal',
-          spin: !!proc?.working,
-          sub: proc?.agent ? `${proc.agent} · ${proc.working ? 'working' : 'waiting for you'}` : cmd ? lastCommand.get(t) ?? '' : '',
+          icon: att ? 'bell-dot' : proc?.working ? 'loading' : proc?.agent ? 'sparkle' : cmd ? 'play-circle' : 'terminal',
+          spin: !att && !!proc?.working,
+          attention: !!att,
+          sub: proc?.agent
+            ? `${proc.agent} · ${att ? attentionText(att) : proc.working ? 'working' : 'idle'}`
+            : cmd ? lastCommand.get(t) ?? '' : '',
         };
       }),
     });
@@ -1109,14 +1211,14 @@ function buildModel(deck, termId) {
       `Branch: ${wtLabel(wt)}${wt.isMain ? ' (main checkout)' : ''}`,
       st?.upstream ? `Upstream: ${st.upstream} ↑${st.ahead} ↓${st.behind}` : '',
       `${staged.length} staged · ${unstaged.length} changed`,
-      working ? 'Agent working' : idle ? 'Agent waiting for you' : '',
+      attention ? `Agent ${attentionText(attention)}` : working ? 'Agent working' : idle ? 'Agent idle' : '',
       wt.path,
     ].filter(Boolean).join('\n');
 
     return {
       path: wt.path, repo: wt.repo.name, title, branch: wtLabel(wt), isMain: wt.isMain, active,
       colorVar: `var(--vscode-${hashColor(wt.path).replace(/\./g, '-')})`,
-      state: working ? 'working' : idle ? 'idle' : '',
+      state: attention ? 'attention' : working ? 'working' : idle ? 'idle' : '',
       // Badges: "●3" on the active worktree, plain change count on the others.
       badge: active ? `●${n || ''}` : n ? String(n) : '',
       meta, sections, tooltip,
@@ -1324,9 +1426,41 @@ function activate(ctx) {
   };
   deck.onChange(updateChrome);
 
+  // Badge on the Agent Deck icon: how many agents need you.
+  const updateBadge = () => {
+    if (!panel.view) return;
+    const n = deck.attentionList().length;
+    panel.view.badge = n ? { value: n, tooltip: `${n} agent${n === 1 ? '' : 's'} need${n === 1 ? 's' : ''} you` } : undefined;
+  };
+  deck.onChange(updateBadge);
+
+  /** Jump to a terminal that needs you: its worktree becomes active and the terminal is focused. */
+  const goTo = (t) => {
+    const wt = deck.worktreeOf(t);
+    if (wt) {
+      deck.lastTerminal.set(wt.path, t);
+      deck.setActive(wt.path);
+    }
+    t.show(false);
+    deck.markSeen(t);
+  };
+
+  deck.onAttention(({ terminal, worktree, attention }) => {
+    const cfg = vscode.workspace.getConfiguration('agentDeck');
+    if (!cfg.get('notifications', true)) return;
+    const what = attention.kind === 'waiting' ? attentionWhat(attention) : 'finished';
+    const title = wtTitle(worktree, deck);
+    vscode.window.showInformationMessage(`${title} — agent ${what}`, 'Show').then((c) => c && goTo(terminal));
+    if (!vscode.window.state.focused && cfg.get('macNotifications', true) && process.platform === 'darwin') {
+      const q = (x) => JSON.stringify(String(x));
+      execFile('osascript', ['-e', `display notification ${q(`Agent ${what}`)} with title "Agent Deck" subtitle ${q(title)} sound name "Glass"`], () => {});
+    }
+  });
+
   /** Reflect the active terminal's worktree in the panel without stealing focus. */
   const syncFromTerminal = (t) => {
     if (!t) return;
+    if (vscode.window.state.focused) deck.markSeen(t);
     const wt = deck.worktreeOf(t);
     if (!wt) return;
     deck.lastTerminal.set(wt.path, t);
@@ -1341,9 +1475,9 @@ function activate(ctx) {
 
   // Poll processes + git status while the window is focused; agents edit files and cd around
   // without telling us.
-  const timer = setInterval(() => {
-    if (vscode.window.state.focused) deck.poll();
-  }, POLL_MS);
+  // In the background only terminal processes are re-scanned (cheap), so "needs you" alerts still
+  // arrive while you're in another app.
+  const timer = setInterval(() => deck.poll(false, { light: !vscode.window.state.focused }), POLL_MS);
 
   // When polling discovers the active terminal moved worktree (e.g. `claude -w` just started),
   // follow it.
@@ -1454,7 +1588,10 @@ function activate(ctx) {
       deck.busy.set(e.terminal, Math.max(0, (deck.busy.get(e.terminal) ?? 1) - 1));
       deck.poll();
     }),
-    vscode.window.onDidChangeWindowState((s) => s.focused && deck.refresh()),
+    vscode.window.onDidChangeWindowState((s) => {
+      if (!s.focused) return;
+      deck.refresh();
+    }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => deck.refresh()),
     vscode.workspace.onDidChangeConfiguration((e) => e.affectsConfiguration('files.exclude') && files.refresh()),
 
@@ -1549,6 +1686,12 @@ function activate(ctx) {
         deck.setActive(wt.path);
       }
       t.show(false);
+      deck.markSeen(t);
+    }),
+    vscode.commands.registerCommand('agentDeck.nextAttention', () => {
+      const next = deck.attentionList()[0];
+      if (next) goTo(next.t);
+      else vscode.window.showInformationMessage('Agent Deck: no agent needs you right now.');
     }),
     vscode.commands.registerCommand('agentDeck.newTerminal', async (arg) => {
       const wt = resolveWt(arg) ?? (await pickWorktree('New terminal in…'));
@@ -1732,7 +1875,7 @@ function activate(ctx) {
     }
   });
 
-  return { deck, panel, model: () => panel.model(), searchRootFor };
+  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge };
 }
 
 function deactivate() {}

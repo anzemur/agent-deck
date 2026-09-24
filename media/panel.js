@@ -13,7 +13,7 @@
     'git-pull-request': '\uea64', 'git-pull-request-draft': '\uebdb', 'git-merge': '\ueafe',
     'git-pull-request-closed': '\uebda', 'play-circle': '\ueba6', check: '\ueab2',
     'link-external': '\ueb14', folder: '\uea83', 'empty-window': '\ueae4',
-    'arrow-up': '\ueaa1', 'arrow-down': '\uea9a',
+    'arrow-up': '\ueaa1', 'arrow-down': '\uea9a', bell: '\ueaa2', 'bell-dot': '\ueb9a',
   };
 
   /** @type {any} */
@@ -68,8 +68,8 @@
               .map(
                 (t) => `<div class="row" tabindex="-1" data-cmd="agentDeck.showTerminal" data-arg="${esc(JSON.stringify({ termId: t.id }))}"
                   data-term="${esc(t.id)}" data-vscode-context="${ctx({ webviewSection: 'terminal', termId: t.id })}">
-                ${ci(t.icon, t.spin ? 'spin' : '', `color:${w.colorVar}`)}
-                <span class="grow"><span class="name">${esc(t.name)}</span><span class="sub">${esc(t.sub)}</span></span>
+                ${ci(t.icon, t.spin ? 'spin' : t.attention ? 'attn' : '', t.attention ? '' : `color:${w.colorVar}`)}
+                <span class="grow"><span class="name">${esc(t.name)}</span><span class="sub ${t.attention ? 'attn' : ''}">${esc(t.sub)}</span></span>
                 <span class="actions">${act('edit', 'Rename', 'agentDeck.renameTerminal', { termId: t.id })}${act('close', 'Kill Terminal', 'agentDeck.killTerminal', { termId: t.id })}</span>
               </div>`,
               )
@@ -97,9 +97,13 @@
 
   function renderWorktree(w) {
     const open = ui.open === w.path;
-    const stateIcon = w.state === 'working' ? ci('loading', 'state spin') : w.state === 'idle' ? ci('sparkle', 'state') : ci(w.isMain ? 'home' : 'git-branch', 'state plain');
-    const meta = w.meta.map((m) => `<span>${m.icon ? ci(m.icon) : ''}${esc(m.text)}</span>`).join('');
-    const head = `<div class="row wt ${w.active ? 'active' : ''}" tabindex="0" role="treeitem" aria-expanded="${open}"
+    const stateIcon =
+      w.state === 'attention' ? ci('bell-dot', 'state attn')
+      : w.state === 'working' ? ci('loading', 'state spin')
+      : w.state === 'idle' ? ci('sparkle', 'state')
+      : ci(w.isMain ? 'home' : 'git-branch', 'state plain');
+    const meta = w.meta.map((m) => `<span class="${m.cls ?? ''}">${m.icon ? ci(m.icon) : ''}${esc(m.text)}</span>`).join('');
+    const head = `<div class="row wt ${w.active ? 'active' : ''} ${w.state === 'attention' ? 'needs' : ''}" tabindex="0" role="treeitem" aria-expanded="${open}"
         data-wt="${esc(w.path)}" title="${esc(w.tooltip)}" data-vscode-context="${ctx(w.context)}">
       ${ci(open ? 'chevron-down' : 'chevron-right', 'twisty')}
       ${stateIcon}

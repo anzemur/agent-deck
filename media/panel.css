@@ -111,3 +111,8 @@ body.vscode-light .seti, body.vscode-high-contrast-light .seti { color: var(--fc
 .repo { padding: 10px 10px 4px; color: var(--muted); font-size: 0.8em; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
 
 .empty { padding: 16px 14px; color: var(--muted); line-height: 1.5; }
+
+/* ---- "needs you" ---- */
+.attn { color: var(--vscode-charts-orange, #d18616) !important; }
+.wt .meta .attn { font-weight: 500; }
+.wt.needs .title { font-weight: 600; }

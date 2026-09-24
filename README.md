@@ -9,6 +9,7 @@ Worktrees and terminals, linked, for running many coding agents at once in VS Co
 - Each worktree's dropdown shows **Staged Changes** and **Changes** first (click a file for a side-by-side diff, `+`/`−` to stage/unstage a file or a whole group), then its **Terminals**, then **Pull Requests**: the branch's own PR (via `gh`) plus any PR linked in its Claude session, with state (open / draft / merged / closed). Click to open in the browser.
 - **Focus a terminal** (tab, panel, `⌘⌥↑/↓`) → the worktree view selects its worktree and the **Files** view switches to that worktree's files.
 - Terminals are linked by what's running in them: a `claude -w` session whose shell sits in the main checkout still shows under the worktree the agent is working in.
+- **Needs you:** when an agent finishes, or stops for a permission prompt / question, in a terminal you're not looking at, its card gets an orange bell ("needs approval · 2m", "done · 4m"), the Agent Deck icon shows a count, and you get a notification (plus a macOS one with sound when Cursor isn't in front). `⌘⌥N` jumps to the agent that has waited longest. Settings: `agentDeck.notifications`, `agentDeck.macNotifications`.
 - **Survives restarts:** every running Claude session is remembered per window. Quit Cursor and on the next start each one is `claude --resume`d in its worktree (reusing the dead restored terminals). Turn off with `agentDeck.resumeOnStartup`.
 - **Refresh Terminals** (`…` menu on Worktrees, or the command palette): replaces old terminals with fresh ones: idle Claude sessions are `claude --resume`d, empty shells reopened, busy ones left alone. Clears the ⚠ "relaunch" markers (the Claude Code extension picks a new port every window load) and gives old terminals their worktree colour.
 - Terminals and worktrees share a colour. Spinner = agent is working (thinking / running tools); ✳ = agent is open but idle, waiting for you; ▶ = a plain command (dev server, tests) is running.
@@ -26,7 +27,7 @@ Worktrees and terminals, linked, for running many coding agents at once in VS Co
 
 ## Keys
 
-`⌘⇧F` search only the active worktree (off: `agentDeck.scopeSearch`) · `⌘⌥W` quick switch · `⌘⌥↓` / `⌘⌥↑` next / previous worktree
+`⌘⇧F` search only the active worktree (off: `agentDeck.scopeSearch`) · `⌘⌥N` go to the agent that needs you · `⌘⌥W` quick switch · `⌘⌥↓` / `⌘⌥↑` next / previous worktree
 
 ## Develop
 
