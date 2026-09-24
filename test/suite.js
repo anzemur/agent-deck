@@ -152,5 +152,34 @@ exports.run = async function () {
   await vscode.commands.executeCommand('agentDeck.unstage', readmeNode);
   await until(() => !deck.changesOf(a.path, 'staged').some((c) => c.path === 'README.md'), 'README unstaged');
   console.log('✓ unstage command works');
+
+  // Worktree label follows the Claude session title; /rename wins; PR number shows.
+  {
+    const { tree } = ext.exports;
+    const fsx = require('fs');
+    const dir = path.join(process.env.AGENT_DECK_CLAUDE_PROJECTS, b.path.replace(/[^a-zA-Z0-9]/g, '-'));
+    fsx.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 's1.jsonl');
+    fsx.writeFileSync(file, [
+      { type: 'user', message: { content: 'hi' } },
+      { type: 'ai-title', aiTitle: 'Old title' },
+      { type: 'ai-title', aiTitle: 'Fix login redirect' },
+      { type: 'pr-link', prNumber: 42, prUrl: 'https://example.com/pr/42' },
+    ].map((o) => JSON.stringify(o)).join('\n') + '\n');
+    await deck.poll();
+    let item = tree.getTreeItem(tree.wtNode(b));
+    assert.strictEqual(item.label, 'Fix login redirect');
+    assert.match(item.description, /feat-b/);
+    assert.match(item.description, /#42/);
+    console.log(`✓ worktree feat-b labelled "${item.label}" (${item.description})`);
+    await sleep(20);
+    fsx.appendFileSync(file, JSON.stringify({ type: 'custom-title', customTitle: 'Login bug' }) + '\n');
+    await deck.poll();
+    item = tree.getTreeItem(tree.wtNode(b));
+    assert.strictEqual(item.label, 'Login bug');
+    console.log('✓ /rename title overrides the AI title');
+    assert.strictEqual(tree.getTreeItem(tree.wtNode(a)).label, 'feat-a');
+    console.log('✓ worktree without a session keeps its branch name');
+  }
   console.log('ALL PASSED');
 };

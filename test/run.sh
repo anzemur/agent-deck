@@ -23,6 +23,7 @@ int main(int c, char **v) {
 C
 cc "$TMP/bin/claude.c" -o "$TMP/bin/claude"
 export AGENT_DECK_TEST_BIN="$TMP/bin"
+export AGENT_DECK_CLAUDE_PROJECTS="$TMP/claude-projects"
 git -C "$TMP/repo" worktree add -q -b feat-a "$TMP/wt/a"
 git -C "$TMP/repo" worktree add -q -b feat-b "$TMP/wt/b"
 mkdir -p "$TMP/ud/User"

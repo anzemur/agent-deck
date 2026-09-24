@@ -3,6 +3,7 @@
 Worktrees and terminals, linked, for running many coding agents at once in VS Code / Cursor.
 
 - **Worktrees view** (activity bar → Agent Deck): every git worktree of every repo in the window.
+- Worktrees are named after **what the agent is doing**: the Claude session title (your `/rename` wins), with the branch and PR number next to it. Set `agentDeck.worktreeLabel` to `branch` to turn this off.
 - **Click a worktree** → the dropdown opens/closes and its linked terminal comes to the front (nothing is created; use *New terminal*).
 - Each worktree's dropdown has **Terminals** (linked terminals, click to focus) and **Changes** (Staged / Unstaged files — click for a side-by-side diff, `+`/`−` to stage/unstage a file or the whole group).
 - **Focus a terminal** (tab, panel, `⌘⌥↑/↓`) → the worktree view selects its worktree and the **Files** view switches to that worktree's files.
@@ -16,6 +17,7 @@ Worktrees and terminals, linked, for running many coding agents at once in VS Co
 |---|---|---|
 | `agentDeck.terminalLocation` | `panel` | `editor` gives each agent a full-size tab |
 | `agentDeck.startupCommand` | `claude` | run in the first terminal of a worktree (extra terminals are plain shells); empty = never |
+| `agentDeck.worktreeLabel` | `title` | `title` = Claude session title, `branch` = branch name |
 | `agentDeck.worktreeParentDir` | `""` | where new worktrees go |
 
 ## Keys

@@ -44,6 +44,7 @@ const COLORS = [
 /** @typedef {{ code: string, path: string, orig?: string }} Change  code is the two-letter porcelain XY */
 /** @typedef {{ changes: Change[], ahead: number, behind: number, upstream: string | undefined }} WtStatus */
 /** @typedef {{ wtPath: string | undefined, fromChild: boolean, agent: string | undefined, working: boolean }} ProcInfo */
+/** @typedef {{ title: string | undefined, prNumber: number | undefined, prUrl: string | undefined }} SessionInfo */
 
 /** @typedef {{ kind: 'repo', id: string, repo: Repo }} RepoNode */
 /** @typedef {{ kind: 'worktree', id: string, wt: Worktree }} WorktreeNode */
@@ -231,6 +232,80 @@ async function scanTerminalProcesses(terminals, locate) {
   return result;
 }
 
+// ---------------------------------------------------------------- claude session titles
+
+const CLAUDE_PROJECTS = process.env.AGENT_DECK_CLAUDE_PROJECTS || path.join(os.homedir(), '.claude', 'projects');
+const TAIL_BYTES = 512 * 1024;
+/** @type {Map<string, { mtimeMs: number, size: number, info: SessionInfo }>} parsed session files */
+const sessionCache = new Map();
+
+/** Claude Code stores sessions under ~/.claude/projects/<cwd with non-alphanumerics as '-'>. */
+function claudeProjectDir(cwd) {
+  return path.join(CLAUDE_PROJECTS, cwd.replace(/[^a-zA-Z0-9]/g, '-'));
+}
+
+/** Last title (/rename beats the AI one) and PR link from a session transcript. */
+function parseSession(file, stat) {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const len = Math.min(stat.size, TAIL_BYTES);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, stat.size - len);
+    /** @type {SessionInfo} */
+    const info = { title: undefined, prNumber: undefined, prUrl: undefined };
+    let custom, ai;
+    for (const line of buf.toString('utf8').split('\n')) {
+      // Cheap pre-filter; the transcript is mostly large message lines we don't care about.
+      if (!line.includes('-title"') && !line.includes('"pr-link"')) continue;
+      let o;
+      try {
+        o = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (o.type === 'custom-title' && o.customTitle) custom = o.customTitle;
+      else if (o.type === 'ai-title' && o.aiTitle) ai = o.aiTitle;
+      else if (o.type === 'pr-link' && o.prNumber) {
+        info.prNumber = Number(o.prNumber);
+        info.prUrl = o.prUrl;
+      }
+    }
+    info.title = custom ?? ai;
+    return info;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** Title / PR of the most recently active Claude session in this worktree. */
+function readSessionInfo(wtPath) {
+  const dir = claudeProjectDir(wtPath);
+  let newest;
+  try {
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.endsWith('.jsonl')) continue;
+      const file = path.join(dir, name);
+      const stat = fs.statSync(file);
+      if (!newest || stat.mtimeMs > newest.stat.mtimeMs) newest = { file, stat };
+    }
+  } catch {
+    return undefined;
+  }
+  if (!newest) return undefined;
+  const { file, stat } = newest;
+  const cached = sessionCache.get(file);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.info;
+  try {
+    const info = parseSession(file, stat);
+    // Keep the previous title if the tail no longer contains one (very long sessions).
+    if (!info.title && cached?.info.title) info.title = cached.info.title;
+    sessionCache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, info });
+    return info;
+  } catch {
+    return cached?.info;
+  }
+}
+
 // ---------------------------------------------------------------- misc helpers
 
 function expandHome(p) {
@@ -250,6 +325,12 @@ function hashColor(key) {
 
 function wtLabel(wt) {
   return wt.branch ?? `${path.basename(wt.path)} (detached)`;
+}
+
+/** Tree label: what the agent is working on, when we know it and the user wants it. */
+function wtTitle(wt, deck) {
+  const mode = vscode.workspace.getConfiguration('agentDeck').get('worktreeLabel');
+  return (mode !== 'branch' && deck.sessions.get(wt.path)?.title) || wtLabel(wt);
 }
 
 function cwdOption(t) {
@@ -299,6 +380,8 @@ class Deck {
     this.busy = new Map();
     /** @type {Map<string, WtStatus>} */
     this.status = new Map();
+    /** @type {Map<string, SessionInfo>} worktree path -> latest Claude session title / PR */
+    this.sessions = new Map();
     /** @type {string | undefined} */
     this.active = ctx.workspaceState.get('agentDeck.active');
     /** @type {vscode.FileSystemWatcher[]} */
@@ -406,10 +489,16 @@ class Deck {
       ]);
       this.procs = procs;
       this.status = new Map(statuses.filter(([, s]) => s).map(([p, s]) => [p, /** @type {WtStatus} */ (s)]));
+      this.sessions = new Map();
+      for (const w of this.worktrees) {
+        const info = readSessionInfo(w.path);
+        if (info) this.sessions.set(w.path, info);
+      }
 
       const sig = JSON.stringify([
         [...procs].map(([t, i]) => [this.names.get(t) ?? t.name, i]),
         [...this.status],
+        [...this.sessions],
       ]);
       if (sig !== this.lastPollSig) {
         this.lastPollSig = sig;
@@ -719,7 +808,9 @@ class WorktreeTree {
         const working = terms.some((t) => deck.isWorking(t));
         const idle = !working && terms.some((t) => deck.isIdleAgent(t));
         const isActive = deck.active === wt.path;
-        const item = new vscode.TreeItem(wtLabel(wt), Collapsed);
+        const session = deck.sessions.get(wt.path);
+        const title = wtTitle(wt, deck);
+        const item = new vscode.TreeItem(title, Collapsed);
         item.id = el.id;
         const color = new vscode.ThemeColor(hashColor(wt.path));
         item.iconPath = new vscode.ThemeIcon(
@@ -730,26 +821,28 @@ class WorktreeTree {
         const bits = [];
         if (working) bits.push('working');
         else if (idle) bits.push('idle');
+        if (title !== wtLabel(wt)) bits.push(wtLabel(wt));
+        if (session?.prNumber) bits.push(`#${session.prNumber}`);
         if (st?.ahead) bits.push(`↑${st.ahead}`);
         if (st?.behind) bits.push(`↓${st.behind}`);
         if (staged) bits.push(`✓${staged}`);
         if (unstaged) bits.push(`±${unstaged}`);
         if (terms.length) bits.push(`${terms.length} term`);
-        const folder = path.basename(wt.path);
-        if (folder !== wt.branch) bits.push(folder);
         if (wt.locked) bits.push('locked');
         if (wt.prunable) bits.push('missing');
         item.description = bits.join(' · ');
 
         const md = new vscode.MarkdownString();
-        md.appendMarkdown(`**${wtLabel(wt)}**${wt.isMain ? ' (main checkout)' : ''}\n\n`);
+        md.appendMarkdown(`**${title}**${wt.isMain ? ' (main checkout)' : ''}\n\n`);
+        if (title !== wtLabel(wt)) md.appendMarkdown(`Branch \`${wtLabel(wt)}\`\n\n`);
+        if (session?.prUrl) md.appendMarkdown(`[PR #${session.prNumber}](${session.prUrl})\n\n`);
         md.appendMarkdown(`\`${wt.path}\`\n\n`);
         md.appendMarkdown(`HEAD \`${wt.head.slice(0, 10)}\``);
         if (st?.upstream) md.appendMarkdown(` · tracking \`${st.upstream}\` (↑${st.ahead} ↓${st.behind})`);
         md.appendMarkdown(`\n\n${staged} staged · ${unstaged} changed`);
         if (terms.length) md.appendMarkdown(`\n\nTerminals: ${terms.map((t) => deck.displayName(t)).join(', ')}`);
         item.tooltip = md;
-        item.contextValue = wt.isMain ? 'worktreeMain' : 'worktree';
+        item.contextValue = (wt.isMain ? 'worktreeMain' : 'worktree') + (session?.prUrl ? ' hasPr' : '');
         // No command on purpose: a click toggles the dropdown, and selection switches the terminal.
         return item;
       }
@@ -932,7 +1025,7 @@ function activate(ctx) {
     const wt = deck.active ? deck.findWorktree(deck.active) : undefined;
     if (wt) {
       const n = deck.changesOf(wt.path, 'unstaged').length + deck.changesOf(wt.path, 'staged').length;
-      status.text = `$(git-branch) ${wtLabel(wt)}${n ? ` ±${n}` : ''}`;
+      status.text = `$(git-branch) ${wtTitle(wt, deck)}${n ? ` ±${n}` : ''}`;
       status.show();
       filesView.description = wtLabel(wt);
       filesView.message = undefined;
@@ -996,8 +1089,8 @@ function activate(ctx) {
       const n = deck.terminalsOf(w.path).length;
       const ch = deck.status.get(w.path)?.changes.length;
       return {
-        label: `$(${w.isMain ? 'repo' : 'git-branch'}) ${wtLabel(w)}`,
-        description: [deck.repos.length > 1 ? w.repo.name : '', ch ? `±${ch}` : '', n ? `${n} term` : '', deck.active === w.path ? 'active' : '']
+        label: `$(${w.isMain ? 'repo' : 'git-branch'}) ${wtTitle(w, deck)}`,
+        description: [wtTitle(w, deck) !== wtLabel(w) ? wtLabel(w) : '', deck.repos.length > 1 ? w.repo.name : '', ch ? `±${ch}` : '', n ? `${n} term` : '', deck.active === w.path ? 'active' : '']
           .filter(Boolean)
           .join(' · '),
         detail: w.path,
@@ -1266,6 +1359,12 @@ function activate(ctx) {
       const wt = resolveWt(arg);
       if (wt) vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(wt.path));
     }),
+    vscode.commands.registerCommand('agentDeck.openPr', (arg) => {
+      const wt = resolveWt(arg);
+      const url = wt && deck.sessions.get(wt.path)?.prUrl;
+      if (url) vscode.env.openExternal(vscode.Uri.parse(url));
+    }),
+    vscode.workspace.onDidChangeConfiguration((e) => e.affectsConfiguration('agentDeck.worktreeLabel') && tree._onDidChange.fire(undefined)),
     vscode.commands.registerCommand('agentDeck.copyPath', (arg) => {
       const wt = resolveWt(arg);
       if (wt) vscode.env.clipboard.writeText(wt.path);

@@ -172,6 +172,12 @@
         "title": "Open File",
         "icon": "$(go-to-file)",
         "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.openPr",
+        "title": "Open Pull Request",
+        "icon": "$(git-pull-request)",
+        "category": "Agent Deck"
       }
     ],
     "menus": {
@@ -245,7 +251,7 @@
         },
         {
           "command": "agentDeck.removeWorktree",
-          "when": "view == agentDeck.worktrees && viewItem == worktree",
+          "when": "view == agentDeck.worktrees && viewItem =~ /^worktree( |$)/",
           "group": "9_danger@1"
         },
         {
@@ -317,6 +323,11 @@
           "command": "agentDeck.newTerminal",
           "when": "view == agentDeck.worktrees && viewItem == terminalsSection",
           "group": "inline@1"
+        },
+        {
+          "command": "agentDeck.openPr",
+          "when": "view == agentDeck.worktrees && viewItem =~ /hasPr/",
+          "group": "1_main@3"
         }
       ],
       "commandPalette": [
@@ -363,6 +374,10 @@
         {
           "command": "agentDeck.openChangedFile",
           "when": "false"
+        },
+        {
+          "command": "agentDeck.openPr",
+          "when": "false"
         }
       ]
     },
@@ -404,6 +419,19 @@
           "type": "string",
           "default": "claude",
           "description": "Command run in the first terminal opened for a worktree. Extra terminals start as a plain shell. Empty = never."
+        },
+        "agentDeck.worktreeLabel": {
+          "type": "string",
+          "enum": [
+            "title",
+            "branch"
+          ],
+          "default": "title",
+          "enumDescriptions": [
+            "What the agent is working on (Claude session title, or your /rename), falling back to the branch",
+            "Always the branch name"
+          ],
+          "description": "What to show as each worktree's name."
         }
       }
     }
