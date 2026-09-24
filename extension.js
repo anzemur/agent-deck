@@ -711,29 +711,31 @@ class Deck {
     await this.poll(true);
     const startup = /** @type {string} */ (vscode.workspace.getConfiguration('agentDeck').get('startupCommand') ?? '').trim();
     const base = startup.startsWith('claude') || startup.includes('/claude') ? startup : 'claude';
-    /** @type {{ t: vscode.Terminal, wt: Worktree, name: string, command?: string, cwd?: string }[]} */
+    /** @type {{ t: vscode.Terminal, wt: Worktree, name: string | undefined, shown: string, command?: string, cwd?: string }[]} */
     const plan = [];
     const skipped = [];
     for (const t of vscode.window.terminals) {
       const p = this.procs.get(t);
       const wt = this.worktreeOf(t);
       if (!p || !wt || t.exitStatus) continue;
-      const name = this.displayName(t);
+      const shown = this.displayName(t);
+      // Titles like "2.1.282" (Claude Code's version) or "zsh" say nothing; use the worktree name.
+      const name = /^(v?\d+(\.\d+)+|zsh|bash|fish|sh|node|claude|codex)$/i.test(shown.trim()) ? undefined : shown;
       if (p.agent) {
         if (p.working || p.agent !== 'claude' || !p.sessionId) {
-          skipped.push(`${name} (${p.working ? 'agent working' : `${p.agent} can't be resumed`})`);
+          skipped.push(`${shown} (${p.working ? 'agent working' : `${p.agent} can't be resumed`})`);
           continue;
         }
         const dir = resumeDirFor(p.sessionId, [wt.path, ...this.worktrees.map((w) => w.path)]);
         if (!dir) {
-          skipped.push(`${name} (session not found)`);
+          skipped.push(`${shown} (session not found)`);
           continue;
         }
-        plan.push({ t, wt, name, command: `${base} --resume ${p.sessionId}`, cwd: dir });
+        plan.push({ t, wt, name, shown, command: `${base} --resume ${p.sessionId}`, cwd: dir });
       } else if (p.hasChildren || this.isRunningCommand(t)) {
-        skipped.push(`${name} (command running)`);
+        skipped.push(`${shown} (command running)`);
       } else {
-        plan.push({ t, wt, name, cwd: p.wtPath && isInside(p.wtPath, wt.path) ? undefined : wt.path });
+        plan.push({ t, wt, name, shown, cwd: p.wtPath && isInside(p.wtPath, wt.path) ? undefined : wt.path });
       }
     }
     return { plan, skipped };

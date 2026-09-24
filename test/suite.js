@@ -267,7 +267,7 @@ exports.run = async function () {
     busy.sendText('sleep 60');
     await sleep(2500);
     const { plan, skipped } = await deck.refreshTerminals();
-    const byName = (n) => plan.find((p) => p.name === n);
+    const byName = (n) => plan.find((p) => p.shown === n);
     assert.match(byName(term.name)?.command ?? '', /--resume sess-b$/);
     assert.ok(byName('old-plain') && !byName('old-plain').command);
     assert.ok(!byName('old-busy') && skipped.some((s) => s.startsWith('old-busy')), JSON.stringify(skipped));
