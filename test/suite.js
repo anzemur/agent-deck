@@ -8,14 +8,17 @@ async function until(fn, what, ms = 8000) {
   const end = Date.now() + ms;
   while (Date.now() < end) {
     if (await fn()) return;
+    await globalDeck?.poll();
     await sleep(100);
   }
   throw new Error(`timed out waiting for ${what}`);
 }
 
+let globalDeck;
 exports.run = async function () {
   const ext = vscode.extensions.getExtension('anzemur.agent-deck');
   const { deck } = await ext.activate();
+  globalDeck = deck;
   await until(() => deck.worktrees.length === 3, '3 worktrees');
   const names = deck.worktrees.map((w) => w.branch).sort();
   assert.deepStrictEqual(names, ['feat-a', 'feat-b', 'main']);
@@ -24,23 +27,35 @@ exports.run = async function () {
   const a = deck.worktrees.find((w) => w.branch === 'feat-a');
   const b = deck.worktrees.find((w) => w.branch === 'feat-b');
 
-  // Click worktree A -> terminal A created, named, focused.
+  // Selecting a worktree with no linked terminal does NOT create one.
   await vscode.commands.executeCommand('agentDeck.selectWorktree', a.path);
-  await until(() => vscode.window.activeTerminal?.name === 'feat-a', 'terminal feat-a active');
+  await sleep(500);
   assert.strictEqual(deck.active, a.path);
-  console.log('✓ clicking worktree feat-a opens + focuses terminal "feat-a"');
+  assert.strictEqual(vscode.window.terminals.length, 0);
+  console.log('✓ selecting feat-a with no terminal just activates it (no terminal created)');
 
-  // Click worktree B -> terminal B.
-  await vscode.commands.executeCommand('agentDeck.selectWorktree', b.path);
+  // Explicit "new terminal" creates a named, linked one.
+  await vscode.commands.executeCommand('agentDeck.newTerminal', a.path);
+  await until(() => vscode.window.activeTerminal?.name === 'feat-a', 'terminal feat-a active');
+  await vscode.commands.executeCommand('agentDeck.newTerminal', b.path);
   await until(() => vscode.window.activeTerminal?.name === 'feat-b', 'terminal feat-b active');
-  assert.strictEqual(deck.active, b.path);
-  console.log('✓ clicking worktree feat-b switches terminal to "feat-b"');
+  console.log('✓ New terminal creates "feat-a" / "feat-b"');
 
-  // Click worktree A again -> reuses existing terminal, no duplicate.
+  // Selecting worktree A brings its existing terminal forward.
   await vscode.commands.executeCommand('agentDeck.selectWorktree', a.path);
   await until(() => vscode.window.activeTerminal?.name === 'feat-a', 'terminal feat-a active again');
   assert.strictEqual(vscode.window.terminals.filter((t) => t.name === 'feat-a').length, 1);
-  console.log('✓ switching back reuses the existing terminal');
+  console.log('✓ selecting feat-a switches to its existing terminal');
+
+  // Tree structure: worktree -> [Terminals, Changes]
+  {
+    const { tree } = ext.exports;
+    const secs = (await tree.getChildren(tree.wtNode(a))).map((n) => tree.getTreeItem(n).label);
+    assert.deepStrictEqual(secs, ['Terminals', 'Changes']);
+    const terms = await tree.getChildren(tree.sectionNode(a, 'terminals'));
+    assert.deepStrictEqual(terms.map((n) => tree.getTreeItem(n).label), ['feat-a']);
+    console.log('✓ worktree dropdown = [Terminals (feat-a), Changes]');
+  }
 
   // Focus terminal B directly (like clicking its tab) -> active worktree follows.
   vscode.window.terminals.find((t) => t.name === 'feat-b').show();
@@ -69,5 +84,51 @@ exports.run = async function () {
   vscode.window.terminals.find((t) => t.name === 'feat-a').dispose();
   await until(() => !deck.terminalsOf(a.path).some((t) => t.name === 'feat-a'), 'terminal unlinked');
   console.log('✓ closing terminal unlinks it');
+
+  // `claude -w` case: shell stays in the main checkout, the agent process runs inside worktree B.
+  const main = deck.worktrees.find((w) => w.isMain);
+  const agentTerm = vscode.window.createTerminal({ name: 'zsh-main', cwd: main.path });
+  agentTerm.sendText(`cd ${JSON.stringify(b.path)} && ${process.env.AGENT_DECK_TEST_BIN}/claude 60 & cd ${JSON.stringify(main.path)}; wait`);
+  await until(() => deck.procs.get(agentTerm)?.agent === 'claude', 'agent detected', 15000).catch(async (e) => {
+    const pid = await Promise.race([agentTerm.processId, sleep(1000).then(() => 'no pid')]);
+    const dump = { pid, procs: [...deck.procs].map(([t, i]) => [t.name, i]), ps: require('child_process').spawnSync('ps', ['-A', '-o', 'pid=,ppid=,comm=']).stdout.toString().split('\n').filter((l) => /claude|sleep|zsh|bash/.test(l)) };
+    require('fs').writeFileSync(process.env.AGENT_DECK_DEBUG ?? '/dev/null', JSON.stringify(dump, null, 1));
+    throw e;
+  });
+  assert.strictEqual(deck.worktreeOf(agentTerm)?.path, b.path);
+  console.log('✓ shell in main + claude running in feat-b → terminal listed under feat-b, marked as claude');
+
+  // Staged vs unstaged changes, per worktree.
+  const fsx = require('fs');
+  fsx.writeFileSync(path.join(a.path, 'README.md'), 'changed\n');
+  fsx.writeFileSync(path.join(a.path, 'staged.txt'), 'x\n');
+  require('child_process').execSync('git add staged.txt', { cwd: a.path });
+  fsx.writeFileSync(path.join(a.path, 'new.txt'), 'y\n');
+  await deck.poll();
+  const staged = deck.changesOf(a.path, 'staged').map((c) => c.path);
+  const unstaged = deck.changesOf(a.path, 'unstaged').map((c) => c.path).sort();
+  assert.deepStrictEqual(staged, ['staged.txt']);
+  assert.deepStrictEqual(unstaged, ['README.md', 'new.txt']);
+  assert.strictEqual(deck.changesOf(b.path, 'unstaged').length, 0);
+  console.log('✓ feat-a: Staged = [staged.txt], Changes = [README.md, new.txt]; feat-b clean');
+
+  const { tree } = ext.exports;
+  const kids = await tree.getChildren(tree.sectionNode(a, 'changes'));
+  const groups = kids.filter((k) => k.kind === 'group').map((k) => tree.getTreeItem(k).label);
+  assert.deepStrictEqual(groups, ['Staged', 'Unstaged']);
+  console.log('✓ feat-a › Changes shows "Staged" and "Unstaged" groups');
+
+  // Stage README via the command, then check the index diff content provider.
+  const readmeNode = (await tree.getChildren(kids.find((k) => k.group === 'unstaged'))).find((n) => n.change.path === 'README.md');
+  await vscode.commands.executeCommand('agentDeck.stage', readmeNode);
+  await until(() => deck.changesOf(a.path, 'staged').some((c) => c.path === 'README.md'), 'README staged');
+  const idx = await vscode.workspace.openTextDocument(vscode.Uri.from({ scheme: 'agentdeck-git', path: path.join(a.path, 'README.md'), query: JSON.stringify({ cwd: a.path, ref: ':' }) }));
+  const head = await vscode.workspace.openTextDocument(vscode.Uri.from({ scheme: 'agentdeck-git', path: path.join(a.path, 'README.md'), query: JSON.stringify({ cwd: a.path, ref: 'HEAD' }) }));
+  assert.strictEqual(idx.getText(), 'changed\n');
+  assert.strictEqual(head.getText(), 'hello\n');
+  console.log('✓ stage command works; diff shows HEAD "hello" ↔ index "changed"');
+  await vscode.commands.executeCommand('agentDeck.unstage', readmeNode);
+  await until(() => !deck.changesOf(a.path, 'staged').some((c) => c.path === 'README.md'), 'README unstaged');
+  console.log('✓ unstage command works');
   console.log('ALL PASSED');
 };

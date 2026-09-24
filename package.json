@@ -148,6 +148,30 @@
         "title": "Collapse All",
         "icon": "$(collapse-all)",
         "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.stage",
+        "title": "Stage",
+        "icon": "$(add)",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.unstage",
+        "title": "Unstage",
+        "icon": "$(remove)",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.openChange",
+        "title": "Open Changes",
+        "icon": "$(diff)",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.openChangedFile",
+        "title": "Open File",
+        "icon": "$(go-to-file)",
+        "category": "Agent Deck"
       }
     ],
     "menus": {
@@ -248,6 +272,56 @@
           "command": "agentDeck.killTerminal",
           "when": "view == agentDeck.worktrees && viewItem == terminal",
           "group": "9_danger@1"
+        },
+        {
+          "command": "agentDeck.openChangedFile",
+          "when": "view == agentDeck.worktrees && viewItem =~ /^(stagedC|c)hange$/",
+          "group": "inline@1"
+        },
+        {
+          "command": "agentDeck.stage",
+          "when": "view == agentDeck.worktrees && viewItem == change",
+          "group": "inline@2"
+        },
+        {
+          "command": "agentDeck.unstage",
+          "when": "view == agentDeck.worktrees && viewItem == stagedChange",
+          "group": "inline@2"
+        },
+        {
+          "command": "agentDeck.stage",
+          "when": "view == agentDeck.worktrees && viewItem == changesGroup",
+          "group": "inline@1"
+        },
+        {
+          "command": "agentDeck.unstage",
+          "when": "view == agentDeck.worktrees && viewItem == stagedGroup",
+          "group": "inline@1"
+        },
+        {
+          "command": "agentDeck.openChange",
+          "when": "view == agentDeck.worktrees && viewItem =~ /^(stagedC|c)hange$/",
+          "group": "1_main@1"
+        },
+        {
+          "command": "agentDeck.openChangedFile",
+          "when": "view == agentDeck.worktrees && viewItem =~ /^(stagedC|c)hange$/",
+          "group": "1_main@2"
+        },
+        {
+          "command": "agentDeck.stage",
+          "when": "view == agentDeck.worktrees && viewItem =~ /^(change|changesGroup)$/",
+          "group": "2_git@1"
+        },
+        {
+          "command": "agentDeck.unstage",
+          "when": "view == agentDeck.worktrees && viewItem =~ /^(stagedChange|stagedGroup)$/",
+          "group": "2_git@1"
+        },
+        {
+          "command": "agentDeck.newTerminal",
+          "when": "view == agentDeck.worktrees && viewItem == terminalsSection",
+          "group": "inline@1"
         }
       ],
       "commandPalette": [
@@ -277,6 +351,22 @@
         },
         {
           "command": "agentDeck.copyPath",
+          "when": "false"
+        },
+        {
+          "command": "agentDeck.stage",
+          "when": "false"
+        },
+        {
+          "command": "agentDeck.unstage",
+          "when": "false"
+        },
+        {
+          "command": "agentDeck.openChange",
+          "when": "false"
+        },
+        {
+          "command": "agentDeck.openChangedFile",
           "when": "false"
         }
       ]
