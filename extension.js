@@ -310,10 +310,6 @@ function resumeDirFor(sessionId, candidates) {
   return undefined;
 }
 
-function shellQuote(s) {
-  return /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
-}
-
 // ---------------------------------------------------------------- claude session titles
 
 const CLAUDE_PROJECTS = process.env.AGENT_DECK_CLAUDE_PROJECTS || path.join(os.homedir(), '.claude', 'projects');
@@ -640,7 +636,7 @@ class Deck {
 
   /**
    * After a restart: run `claude --resume` for every recorded session that is no longer alive.
-   * Terminals restored by the editor are empty shells at that point, so they are reused first.
+   * Terminals restored by the editor are empty shells at that point; one is closed per resumed session.
    * @returns {Promise<number>} how many sessions were resumed
    */
   async resumeAgents() {
@@ -673,15 +669,12 @@ class Deck {
           continue;
         }
         const command = `${base} --resume ${r.sessionId}`;
+        // Replace a dead restored terminal rather than typing into it: restored shells keep a stale
+        // environment (the editor then flags them), and Claude's editor integration needs the fresh one.
         const pick = spare.findIndex((t) => t.name === r.name);
-        const reuse = spare.splice(pick >= 0 ? pick : 0, spare.length ? 1 : 0)[0];
-        if (reuse) {
-          reuse.sendText(`cd ${shellQuote(dir)} && ${command}`, true);
-          this.links.set(reuse, wt.path);
-          this.names.set(reuse, reuse.name);
-        } else {
-          this.createTerminal(wt, { show: false, name: r.name, command, cwd: dir });
-        }
+        const dead = spare.splice(pick >= 0 ? pick : 0, spare.length ? 1 : 0)[0];
+        dead?.dispose();
+        this.createTerminal(wt, { show: false, name: r.name, command, cwd: dir });
         resumed++;
       }
       this.saveLinks();
