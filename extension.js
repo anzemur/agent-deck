@@ -43,7 +43,7 @@ const COLORS = [
 /** @typedef {{ commonDir: string, root: string, name: string, pinned: boolean, worktrees: Worktree[] }} Repo */
 /** @typedef {{ code: string, path: string, orig?: string }} Change  code is the two-letter porcelain XY */
 /** @typedef {{ changes: Change[], ahead: number, behind: number, upstream: string | undefined }} WtStatus */
-/** @typedef {{ wtPath: string | undefined, fromChild: boolean, agent: string | undefined, working: boolean, sessionId: string | undefined }} ProcInfo */
+/** @typedef {{ wtPath: string | undefined, fromChild: boolean, agent: string | undefined, working: boolean, sessionId: string | undefined, hasChildren: boolean }} ProcInfo */
 /** @typedef {{ sessionId: string, wtPath: string, name: string }} AgentRecord  a Claude session to bring back after a restart */
 /** @typedef {{ title: string | undefined, prs: { number: number, url: string }[] }} SessionInfo */
 /** @typedef {{ number: number, url: string, title: string | undefined, state: string | undefined, isDraft: boolean, own: boolean }} PullRequest  own = this worktree's branch is its head */
@@ -225,7 +225,7 @@ async function scanTerminalProcesses(terminals, locate) {
       if (prev && now > prev.at) working = (cpu - prev.cpu) / ((now - prev.at) / 1000) >= WORKING_CPU;
       cpuSamples.set(agentPid, { cpu, at: now });
     }
-    result.set(t, { wtPath, fromChild, agent, working, sessionId: pidFile?.sessionId });
+    result.set(t, { wtPath, fromChild, agent, working, sessionId: pidFile?.sessionId, hasChildren: children.length > 0 });
   }
   return result;
 }
@@ -701,6 +701,44 @@ class Deck {
     }
   }
 
+  /**
+   * Replaces terminals with fresh ones: idle Claude sessions are resumed (`claude --resume`) in a
+   * new terminal, empty shells are reopened in the same folder. Fresh terminals get the current
+   * environment (no "relaunch" warnings, working editor integration) and their worktree colour.
+   * Anything busy — a working agent, a dev server, tests — is left alone.
+   */
+  async refreshTerminals() {
+    await this.poll(true);
+    const startup = /** @type {string} */ (vscode.workspace.getConfiguration('agentDeck').get('startupCommand') ?? '').trim();
+    const base = startup.startsWith('claude') || startup.includes('/claude') ? startup : 'claude';
+    /** @type {{ t: vscode.Terminal, wt: Worktree, name: string, command?: string, cwd?: string }[]} */
+    const plan = [];
+    const skipped = [];
+    for (const t of vscode.window.terminals) {
+      const p = this.procs.get(t);
+      const wt = this.worktreeOf(t);
+      if (!p || !wt || t.exitStatus) continue;
+      const name = this.displayName(t);
+      if (p.agent) {
+        if (p.working || p.agent !== 'claude' || !p.sessionId) {
+          skipped.push(`${name} (${p.working ? 'agent working' : `${p.agent} can't be resumed`})`);
+          continue;
+        }
+        const dir = resumeDirFor(p.sessionId, [wt.path, ...this.worktrees.map((w) => w.path)]);
+        if (!dir) {
+          skipped.push(`${name} (session not found)`);
+          continue;
+        }
+        plan.push({ t, wt, name, command: `${base} --resume ${p.sessionId}`, cwd: dir });
+      } else if (p.hasChildren || this.isRunningCommand(t)) {
+        skipped.push(`${name} (command running)`);
+      } else {
+        plan.push({ t, wt, name, cwd: p.wtPath && isInside(p.wtPath, wt.path) ? undefined : wt.path });
+      }
+    }
+    return { plan, skipped };
+  }
+
   // ------------------------------------------------------------ resume after restart
 
   /** One record list per window, keyed by its folders, so two windows never resume each other's agents. */
@@ -893,7 +931,7 @@ class Deck {
 
   /** @param {Worktree} wt */
   /** `command` replaces the startup command; `cwd` overrides where the shell starts. */
-  createTerminal(wt, { show = true, preserveFocus = false, name: wanted = undefined, command = undefined, cwd = undefined } = {}) {
+  createTerminal(wt, { show = true, preserveFocus = false, name: wanted = undefined, command = undefined, cwd = undefined, plain = false } = {}) {
     const cfg = vscode.workspace.getConfiguration('agentDeck');
     const base = wanted ?? wtLabel(wt);
     const existing = this.terminalsOf(wt.path);
@@ -917,7 +955,7 @@ class Deck {
     // Only the first terminal of a worktree starts the agent; extra ones are plain shells.
     const startup = /** @type {string} */ (cfg.get('startupCommand') ?? '').trim();
     if (command) terminal.sendText(command, true);
-    else if (startup && !existing.length) terminal.sendText(startup, true);
+    else if (startup && !existing.length && !plain) terminal.sendText(startup, true);
     if (show) terminal.show(preserveFocus);
     this._onChange.fire();
     return terminal;
@@ -1448,6 +1486,36 @@ function activate(ctx) {
       const opened = await vscode.window.showTextDocument(vscode.Uri.file(real), { selection, viewColumn: ed.viewColumn, preview: tab?.isPreview });
       opened.revealRange(selection, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
       if (tab && !ed.document.isDirty) await vscode.window.tabGroups.close(tab);
+    }),
+    vscode.commands.registerCommand('agentDeck.refreshTerminals', async () => {
+      const { plan, skipped } = await deck.refreshTerminals();
+      if (!plan.length) {
+        vscode.window.showInformationMessage(`Agent Deck: nothing to refresh.${skipped.length ? ` Left alone: ${skipped.join(', ')}.` : ''}`);
+        return;
+      }
+      const agents = plan.filter((p) => p.command).length;
+      const ok = await vscode.window.showWarningMessage(
+        `Refresh ${plan.length} terminal${plan.length === 1 ? '' : 's'}?`,
+        {
+          modal: true,
+          detail: [
+            agents ? `${agents} idle Claude session(s) will be resumed in fresh terminals (conversation kept).` : '',
+            plan.length - agents ? `${plan.length - agents} empty shell(s) will be reopened.` : '',
+            skipped.length ? `Left alone: ${skipped.join(', ')}.` : '',
+          ].filter(Boolean).join('\n'),
+        },
+        'Refresh',
+      );
+      if (ok !== 'Refresh') return;
+      const active = vscode.window.activeTerminal;
+      let focus;
+      for (const p of plan) {
+        const fresh = deck.createTerminal(p.wt, { show: false, name: p.name, command: p.command, cwd: p.cwd, plain: true });
+        if (p.t === active) focus = fresh;
+        p.t.dispose();
+      }
+      focus?.show(true);
+      setTimeout(() => deck.poll(), 3000);
     }),
     vscode.commands.registerCommand('agentDeck.findInWorktree', () => {
       // Scope Search to the active worktree. An absolute path in "files to include" also works for

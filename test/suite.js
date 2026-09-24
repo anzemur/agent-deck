@@ -260,6 +260,20 @@ exports.run = async function () {
     console.log('✓ running session recorded for the next restart');
     assert.strictEqual(await deck.resumeAgents(), 0);
     console.log('✓ a session that is still alive is not resumed twice');
+
+    // Refresh Terminals: idle Claude → resumed fresh; empty shell → reopened; busy → left alone.
+    const oldPlain = vscode.window.createTerminal({ name: 'old-plain', cwd: a.path });
+    const busy = vscode.window.createTerminal({ name: 'old-busy', cwd: a.path });
+    busy.sendText('sleep 60');
+    await sleep(2500);
+    const { plan, skipped } = await deck.refreshTerminals();
+    const byName = (n) => plan.find((p) => p.name === n);
+    assert.match(byName(term.name)?.command ?? '', /--resume sess-b$/);
+    assert.ok(byName('old-plain') && !byName('old-plain').command);
+    assert.ok(!byName('old-busy') && skipped.some((s) => s.startsWith('old-busy')), JSON.stringify(skipped));
+    console.log(`✓ refresh plan: idle claude → resume, empty shell → reopen, busy "sleep" left alone (${skipped.length} skipped)`);
+    oldPlain.dispose();
+    busy.dispose();
   }
 
   // ⌘⇧F scoping: worktrees nested inside the workspace folder (and usually .gitignored there, like

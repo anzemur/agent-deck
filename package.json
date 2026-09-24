@@ -186,6 +186,12 @@
         "title": "Search in Active Worktree",
         "icon": "$(search)",
         "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.refreshTerminals",
+        "title": "Refresh Terminals (resume idle agents)",
+        "icon": "$(debug-restart)",
+        "category": "Agent Deck"
       }
     ],
     "menus": {
@@ -209,6 +215,11 @@
           "command": "agentDeck.collapseFiles",
           "when": "view == agentDeck.files",
           "group": "navigation@2"
+        },
+        {
+          "command": "agentDeck.refreshTerminals",
+          "when": "view == agentDeck.worktrees",
+          "group": "1_more@1"
         }
       ],
       "commandPalette": [
