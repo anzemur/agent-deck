@@ -483,6 +483,40 @@ function describeCode(code, group) {
   return map[c] ?? [c, 'gitDecoration.modifiedResourceForeground'];
 }
 
+/**
+ * Path to give Search's "files to include" for a worktree. A worktree outside every workspace
+ * folder is searched as its own root. One nested inside a workspace folder (like
+ * .claude/worktrees/*) would be searched as part of that folder, whose .gitignore usually excludes
+ * it, so it is reached through a symlink outside the workspace, making it its own root again.
+ */
+const SEARCH_LINKS = process.env.AGENT_DECK_SEARCH_LINKS || path.join(os.homedir(), '.agent-deck', 'search');
+
+function searchRootFor(wt, folders) {
+  const real = (p) => {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return p;
+    }
+  };
+  if (!folders.some((f) => isInside(real(wt.path), real(f)))) return wt.path;
+  const dir = SEARCH_LINKS;
+  // Readable name; disambiguated only if two worktrees share a folder name.
+  const hash = Math.abs([...wt.path].reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 0)).toString(36).slice(0, 4);
+  let link = path.join(dir, path.basename(wt.path));
+  try {
+    if (fs.readlinkSync(link) !== wt.path) link = `${link}-${hash}`;
+  } catch {}
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    if (fs.readlinkSync(link) !== wt.path) fs.unlinkSync(link);
+  } catch {}
+  try {
+    fs.symlinkSync(wt.path, link, 'dir');
+  } catch {}
+  return link;
+}
+
 // ---------------------------------------------------------------- deck state
 
 class Deck {
@@ -606,8 +640,21 @@ class Deck {
    * Re-reads the cheap-but-changing state: which worktree each terminal's processes are in,
    * git status per worktree. Fires onChange only when something differs.
    */
-  async poll(silent = false) {
-    if (this.polling) return;
+  poll(silent = false) {
+    // One poll at a time; a request during a poll gets a fresh one right after it, so callers
+    // always see state read after they asked.
+    if (this.pollRun) {
+      this.pollNext ??= this.pollRun.then(() => {
+        this.pollNext = undefined;
+        return this.poll(silent);
+      });
+      return this.pollNext;
+    }
+    this.pollRun = this._poll(silent).finally(() => (this.pollRun = undefined));
+    return this.pollRun;
+  }
+
+  async _poll(silent) {
     this.polling = true;
     try {
       const terminals = [...vscode.window.terminals];
@@ -1382,6 +1429,44 @@ function activate(ctx) {
       const wt = await pickWorktree('Switch to worktree');
       if (wt) deck.switchTo(wt.path);
     }),
+    // Search results inside a symlinked worktree open under the link path; swap to the real file
+    // so git decorations, the Files view and other open tabs all agree on one path.
+    vscode.window.onDidChangeActiveTextEditor(async (ed) => {
+      const uri = ed?.document.uri;
+      if (!uri || uri.scheme !== 'file' || !isInside(uri.fsPath, SEARCH_LINKS)) return;
+      let real;
+      try {
+        real = fs.realpathSync(uri.fsPath);
+      } catch {
+        return;
+      }
+      if (real === uri.fsPath) return;
+      // The editor applies the search hit's selection just after it becomes active.
+      await new Promise((r) => setTimeout(r, 60));
+      const selection = ed.selection;
+      const tab = vscode.window.tabGroups.all.flatMap((g) => g.tabs).find((t) => t.input instanceof vscode.TabInputText && t.input.uri.toString() === uri.toString());
+      const opened = await vscode.window.showTextDocument(vscode.Uri.file(real), { selection, viewColumn: ed.viewColumn, preview: tab?.isPreview });
+      opened.revealRange(selection, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+      if (tab && !ed.document.isDirty) await vscode.window.tabGroups.close(tab);
+    }),
+    vscode.commands.registerCommand('agentDeck.findInWorktree', () => {
+      // Scope Search to the active worktree. An absolute path in "files to include" also works for
+      // worktrees outside the open folder (e.g. ~/.superset/worktrees/...). For the main checkout,
+      // which is the workspace itself, clear the scope instead.
+      const wt = deck.active ? deck.findWorktree(deck.active) : undefined;
+      const folders = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
+      const same = (x, y) => {
+        try {
+          return fs.realpathSync(x) === fs.realpathSync(y);
+        } catch {
+          return x === y;
+        }
+      };
+      if (!wt || folders.some((f) => same(f, wt.path))) {
+        return vscode.commands.executeCommand('workbench.action.findInFiles', { filesToInclude: '', showIncludesExcludes: false });
+      }
+      return vscode.commands.executeCommand('workbench.action.findInFiles', { filesToInclude: searchRootFor(wt, folders), showIncludesExcludes: true });
+    }),
     vscode.commands.registerCommand('agentDeck.nextWorktree', () => cycle(1)),
     vscode.commands.registerCommand('agentDeck.prevWorktree', () => cycle(-1)),
 
@@ -1572,7 +1657,7 @@ function activate(ctx) {
     }
   });
 
-  return { deck, panel, model: () => panel.model() };
+  return { deck, panel, model: () => panel.model(), searchRootFor };
 }
 
 function deactivate() {}

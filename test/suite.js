@@ -259,5 +259,26 @@ exports.run = async function () {
     assert.strictEqual(await deck.resumeAgents(), 0);
     console.log('✓ a session that is still alive is not resumed twice');
   }
+
+  // ⌘⇧F scoping: worktrees nested inside the workspace folder (and usually .gitignored there, like
+  // .claude/worktrees) are searched through a symlink so they become their own search root.
+  {
+    const fsx = require('fs');
+    const { searchRootFor } = ext.exports;
+    const folders = vscode.workspace.workspaceFolders.map((f) => f.uri.fsPath);
+    assert.strictEqual(searchRootFor(a, folders), a.path);
+    require('child_process').execSync('git worktree add -q -b feat-n nested/n', { cwd: main.path });
+    await deck.refresh();
+    const nwt = deck.worktrees.find((w) => w.branch === 'feat-n');
+    const link = searchRootFor(nwt, folders);
+    assert.ok(link.startsWith(process.env.AGENT_DECK_SEARCH_LINKS) && fsx.realpathSync(link) === fsx.realpathSync(nwt.path));
+    console.log(`✓ search scope: outside worktree = its path; nested worktree = symlink ${path.basename(link)}`);
+    fsx.writeFileSync(path.join(nwt.path, 'x.ts'), 'a\nb\nc\n');
+    await vscode.window.showTextDocument(vscode.Uri.file(path.join(link, 'x.ts')), { selection: new vscode.Range(2, 0, 2, 0) });
+    await until(() => vscode.window.activeTextEditor?.document.uri.fsPath === fsx.realpathSync(path.join(nwt.path, 'x.ts')), 'reopened at real path');
+    assert.strictEqual(vscode.window.activeTextEditor.selection.active.line, 2);
+    assert.ok(!vscode.window.tabGroups.all.flatMap((g) => g.tabs).some((t) => t.input?.uri?.fsPath?.startsWith(process.env.AGENT_DECK_SEARCH_LINKS)));
+    console.log('✓ a search result opened via the symlink is swapped to the real file, same line, link tab closed');
+  }
   console.log('ALL PASSED');
 };

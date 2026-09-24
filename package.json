@@ -180,6 +180,12 @@
         "title": "Copy Link",
         "icon": "$(copy)",
         "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.findInWorktree",
+        "title": "Search in Active Worktree",
+        "icon": "$(search)",
+        "category": "Agent Deck"
       }
     ],
     "menus": {
@@ -362,6 +368,12 @@
         "command": "agentDeck.prevWorktree",
         "key": "cmd+alt+up",
         "mac": "cmd+alt+up"
+      },
+      {
+        "command": "agentDeck.findInWorktree",
+        "key": "cmd+shift+f",
+        "mac": "cmd+shift+f",
+        "when": "config.agentDeck.scopeSearch"
       }
     ],
     "configuration": {
@@ -403,6 +415,11 @@
           "type": "boolean",
           "default": true,
           "description": "When the editor starts, resume (claude --resume) every Claude session that was running in this window's terminals when it last closed."
+        },
+        "agentDeck.scopeSearch": {
+          "type": "boolean",
+          "default": true,
+          "description": "\u2318\u21e7F searches only the active worktree (via 'files to include'). Turn off to get the normal workspace-wide search."
         }
       }
     }
