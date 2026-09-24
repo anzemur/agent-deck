@@ -51,10 +51,10 @@ exports.run = async function () {
   {
     const { tree } = ext.exports;
     const secs = (await tree.getChildren(tree.wtNode(a))).map((n) => tree.getTreeItem(n).label);
-    assert.deepStrictEqual(secs, ['No changes', 'Terminals']);
+    assert.deepStrictEqual(secs, ['No changes', 'Terminals', 'Pull Requests']);
     const terms = await tree.getChildren(tree.sectionNode(a, 'terminals'));
     assert.deepStrictEqual(terms.map((n) => tree.getTreeItem(n).label), ['feat-a']);
-    console.log('✓ worktree dropdown = [No changes, Terminals (feat-a)]');
+    console.log('✓ worktree dropdown = [No changes, Terminals (feat-a), Pull Requests]');
   }
 
   // Focus terminal B directly (like clicking its tab) -> active worktree follows.
@@ -136,8 +136,8 @@ exports.run = async function () {
 
   const { tree } = ext.exports;
   const kids = await tree.getChildren(tree.wtNode(a));
-  assert.deepStrictEqual(kids.map((k) => tree.getTreeItem(k).label), ['Staged Changes', 'Changes', 'Terminals']);
-  console.log('✓ feat-a dropdown = [Staged Changes, Changes, Terminals] (changes on top)');
+  assert.deepStrictEqual(kids.map((k) => tree.getTreeItem(k).label), ['Staged Changes', 'Changes', 'Terminals', 'Pull Requests']);
+  console.log('✓ feat-a dropdown = [Staged Changes, Changes, Terminals, Pull Requests] (changes on top)');
 
   // Stage README via the command, then check the index diff content provider.
   const readmeNode = (await tree.getChildren(kids.find((k) => k.group === 'unstaged'))).find((n) => n.change.path === 'README.md');
@@ -169,8 +169,29 @@ exports.run = async function () {
     let item = tree.getTreeItem(tree.wtNode(b));
     assert.strictEqual(item.label, 'Fix login redirect');
     assert.match(item.description, /feat-b/);
-    assert.match(item.description, /#42/);
     console.log(`✓ worktree feat-b labelled "${item.label}" (${item.description})`);
+    await until(async () => (deck.prs.get(b.path) ?? []).some((p) => p.number === 42), 'PR from session', 15000);
+    const prSection = tree.sectionNode(b, 'prs');
+    assert.strictEqual(tree.getTreeItem(prSection).label, 'Pull Requests');
+    const prRows = (await tree.getChildren(prSection)).map((n) => tree.getTreeItem(n));
+    assert.strictEqual(prRows[0].label, '#42');
+    assert.match(String(prRows[0].description), /from session/);
+    assert.strictEqual(prRows[0].command.command, 'agentDeck.openPrLink');
+    const order = (await tree.getChildren(tree.wtNode(b))).map((n) => tree.getTreeItem(n).label);
+    assert.deepStrictEqual(order.slice(-2), ['Terminals', 'Pull Requests']);
+    console.log('✓ Pull Requests section after Terminals lists #42 (linked in session), click opens link');
+
+    // Active worktree: coloured name + ● badge; header shows its name.
+    await vscode.commands.executeCommand('agentDeck.selectWorktree', b.path);
+    const { decorations, view } = ext.exports;
+    const decoB = decorations.provideFileDecoration(tree.getTreeItem(tree.wtNode(b)).resourceUri);
+    const decoA = decorations.provideFileDecoration(tree.getTreeItem(tree.wtNode(a)).resourceUri);
+    assert.ok(decoB.color, 'active worktree has a colour');
+    assert.match(decoB.badge, /^●/);
+    assert.ok(!decoA.color, 'inactive worktree is not coloured');
+    assert.ok(!String(decoA.badge ?? '').includes('●'));
+    assert.strictEqual(view.description, 'Fix login redirect');
+    console.log(`✓ active worktree: coloured name, badge "${decoB.badge}", header "WORKTREES · ${view.description}"`);
     await sleep(20);
     fsx.appendFileSync(file, JSON.stringify({ type: 'custom-title', customTitle: 'Login bug' }) + '\n');
     await deck.poll();

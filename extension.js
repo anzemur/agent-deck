@@ -45,7 +45,8 @@ const COLORS = [
 /** @typedef {{ changes: Change[], ahead: number, behind: number, upstream: string | undefined }} WtStatus */
 /** @typedef {{ wtPath: string | undefined, fromChild: boolean, agent: string | undefined, working: boolean, sessionId: string | undefined }} ProcInfo */
 /** @typedef {{ sessionId: string, wtPath: string, name: string }} AgentRecord  a Claude session to bring back after a restart */
-/** @typedef {{ title: string | undefined, prNumber: number | undefined, prUrl: string | undefined }} SessionInfo */
+/** @typedef {{ title: string | undefined, prs: { number: number, url: string }[] }} SessionInfo */
+/** @typedef {{ number: number, url: string, title: string | undefined, state: string | undefined, isDraft: boolean, own: boolean }} PullRequest  own = this worktree's branch is its head */
 
 /** @typedef {{ kind: 'repo', id: string, repo: Repo }} RepoNode */
 /** @typedef {{ kind: 'worktree', id: string, wt: Worktree }} WorktreeNode */
@@ -53,10 +54,11 @@ const COLORS = [
 /** @typedef {'staged' | 'unstaged'} Group */
 /** @typedef {{ kind: 'group', id: string, wt: Worktree, group: Group }} GroupNode */
 /** @typedef {{ kind: 'change', id: string, wt: Worktree, group: Group, change: Change }} ChangeNode */
-/** @typedef {{ kind: 'section', id: string, wt: Worktree, section: 'terminals' | 'changes' }} SectionNode */
+/** @typedef {{ kind: 'section', id: string, wt: Worktree, section: 'terminals' | 'prs' }} SectionNode */
+/** @typedef {{ kind: 'pr', id: string, wt: Worktree, pr: PullRequest }} PrNode */
 /** @typedef {{ kind: 'newTerminal', id: string, wt: Worktree }} NewTerminalNode */
 /** @typedef {{ kind: 'clean', id: string, wt: Worktree }} CleanNode */
-/** @typedef {RepoNode | WorktreeNode | SectionNode | TerminalNode | NewTerminalNode | GroupNode | ChangeNode | CleanNode} Node */
+/** @typedef {RepoNode | WorktreeNode | SectionNode | TerminalNode | NewTerminalNode | GroupNode | ChangeNode | CleanNode | PrNode} Node */
 
 // ---------------------------------------------------------------- process helpers
 
@@ -331,7 +333,7 @@ function parseSession(file, stat) {
     const buf = Buffer.alloc(len);
     fs.readSync(fd, buf, 0, len, stat.size - len);
     /** @type {SessionInfo} */
-    const info = { title: undefined, prNumber: undefined, prUrl: undefined };
+    const info = { title: undefined, prs: [] };
     let custom, ai;
     for (const line of buf.toString('utf8').split('\n')) {
       // Cheap pre-filter; the transcript is mostly large message lines we don't care about.
@@ -344,9 +346,8 @@ function parseSession(file, stat) {
       }
       if (o.type === 'custom-title' && o.customTitle) custom = o.customTitle;
       else if (o.type === 'ai-title' && o.aiTitle) ai = o.aiTitle;
-      else if (o.type === 'pr-link' && o.prNumber) {
-        info.prNumber = Number(o.prNumber);
-        info.prUrl = o.prUrl;
+      else if (o.type === 'pr-link' && o.prNumber && !info.prs.some((p) => p.number === Number(o.prNumber))) {
+        info.prs.push({ number: Number(o.prNumber), url: o.prUrl });
       }
     }
     info.title = custom ?? ai;
@@ -376,13 +377,66 @@ function readSessionInfo(wtPath) {
   if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.info;
   try {
     const info = parseSession(file, stat);
-    // Keep the previous title if the tail no longer contains one (very long sessions).
+    // Keep what scrolled out of the tail on very long sessions.
     if (!info.title && cached?.info.title) info.title = cached.info.title;
+    for (const p of cached?.info.prs ?? []) if (!info.prs.some((q) => q.number === p.number)) info.prs.push(p);
     sessionCache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, info });
     return info;
   } catch {
     return cached?.info;
   }
+}
+
+// ---------------------------------------------------------------- pull requests (gh)
+
+const PR_TTL_MS = 90 * 1000;
+/** @type {Map<string, { at: number, data: any }>} */
+const ghCache = new Map();
+let ghMissing = false;
+
+/** Cached `gh` JSON call; undefined when gh is missing, not logged in, or the repo isn't on GitHub. */
+async function ghJson(cwd, args) {
+  if (ghMissing) return undefined;
+  const key = `${cwd}\0${args.join(' ')}`;
+  const hit = ghCache.get(key);
+  if (hit && Date.now() - hit.at < PR_TTL_MS) return hit.data;
+  const data = await new Promise((resolve) => {
+    execFile('gh', args, { cwd, timeout: 15000 }, (err, stdout) => {
+      if (err && /** @type {any} */ (err).code === 'ENOENT') ghMissing = true;
+      if (err) return resolve(undefined);
+      try {
+        resolve(JSON.parse(stdout));
+      } catch {
+        resolve(undefined);
+      }
+    });
+  });
+  ghCache.set(key, { at: Date.now(), data });
+  return data;
+}
+
+const PR_FIELDS = 'number,title,url,state,isDraft,headRefName';
+
+/**
+ * PRs for a worktree: the ones whose head is its branch, plus the ones its Claude session linked.
+ * @param {Worktree} wt
+ * @param {SessionInfo | undefined} session
+ * @returns {Promise<PullRequest[]>}
+ */
+async function readPrs(wt, session) {
+  /** @type {Map<number, PullRequest>} */
+  const out = new Map();
+  if (wt.branch) {
+    const own = await ghJson(wt.repo.root, ['pr', 'list', '--head', wt.branch, '--state', 'all', '--json', PR_FIELDS, '--limit', '5']);
+    for (const p of own ?? []) out.set(p.number, { ...p, own: true });
+  }
+  for (const link of session?.prs ?? []) {
+    if (out.has(link.number)) continue;
+    const p = await ghJson(wt.repo.root, ['pr', 'view', String(link.number), '--json', PR_FIELDS]);
+    out.set(link.number, p ? { ...p, own: p.headRefName === wt.branch } : { number: link.number, url: link.url, title: undefined, state: undefined, isDraft: false, own: false });
+  }
+  // Own PRs first, then newest first.
+  return [...out.values()].sort((a, b) => Number(b.own) - Number(a.own) || b.number - a.number);
 }
 
 // ---------------------------------------------------------------- misc helpers
@@ -461,6 +515,9 @@ class Deck {
     this.status = new Map();
     /** @type {Map<string, SessionInfo>} worktree path -> latest Claude session title / PR */
     this.sessions = new Map();
+    /** @type {Map<string, PullRequest[]>} worktree path -> related pull requests */
+    this.prs = new Map();
+    this.prsLoading = false;
     /** @type {string | undefined} */
     this.active = ctx.workspaceState.get('agentDeck.active');
     /** @type {vscode.FileSystemWatcher[]} */
@@ -577,6 +634,7 @@ class Deck {
         if (info) this.sessions.set(w.path, info);
       }
 
+      this.refreshPrs();
       const sig = JSON.stringify([
         [...procs].map(([t, i]) => [this.names.get(t) ?? t.name, i]),
         [...this.status],
@@ -588,6 +646,21 @@ class Deck {
       }
     } finally {
       this.polling = false;
+    }
+  }
+
+  /** Looks PRs up in the background (gh is slow); results are cached for a minute and a half. */
+  async refreshPrs() {
+    if (this.prsLoading) return;
+    this.prsLoading = true;
+    try {
+      const next = new Map();
+      for (const w of this.worktrees) next.set(w.path, await readPrs(w, this.sessions.get(w.path)));
+      const changed = JSON.stringify([...next]) !== JSON.stringify([...this.prs]);
+      this.prs = next;
+      if (changed) this._onChange.fire();
+    } finally {
+      this.prsLoading = false;
     }
   }
 
@@ -925,10 +998,14 @@ class WorktreeTree {
           .map((group) => this.node({ kind: 'group', id: `${group}:${wt.path}`, wt, group }));
         if (!out.length) out.push(this.node({ kind: 'clean', id: `clean:${wt.path}`, wt }));
         out.push(this.sectionNode(wt, 'terminals'));
+        out.push(this.sectionNode(wt, 'prs'));
         return out;
       }
       case 'section': {
         const wt = el.wt;
+        if (el.section === 'prs') {
+          return (deck.prs.get(wt.path) ?? []).map((pr) => this.node({ kind: 'pr', id: `pr:${wt.path}:${pr.number}`, wt, pr }));
+        }
         const terms = deck.terminalsOf(wt.path).map((t) => this.termNode(t, wt.path));
         return terms.length ? terms : [this.node({ kind: 'newTerminal', id: `newTerminal:${wt.path}`, wt })];
       }
@@ -961,6 +1038,8 @@ class WorktreeTree {
       case 'group':
       case 'clean':
         return this.wtNode(el.wt);
+      case 'pr':
+        return this.sectionNode(el.wt, 'prs');
       case 'change':
         return this.nodes.get(`${el.group}:${el.wt.path}`);
       default:
@@ -993,18 +1072,21 @@ class WorktreeTree {
         const unstaged = deck.changesOf(wt.path, 'unstaged').length;
         const working = terms.some((t) => deck.isWorking(t));
         const idle = !working && terms.some((t) => deck.isIdleAgent(t));
-        const session = deck.sessions.get(wt.path);
+        const prs = deck.prs.get(wt.path) ?? [];
+        const ownPr = prs.find((p) => p.own);
+        const isActive = deck.active === wt.path;
         const title = wtTitle(wt, deck);
         const item = new vscode.TreeItem(title, Collapsed);
         item.id = el.id;
-        // The icon carries the agent state; the change count sits right-aligned as a badge.
-        item.resourceUri = decoUri('wt', wt.path, { n: st?.changes.length ?? 0, working, idle });
+        // The icon carries the agent state; the change count (and ● when active) sits right-aligned,
+        // and the active worktree's name is drawn in its own colour.
+        item.resourceUri = decoUri('wt', wt.path, { n: st?.changes.length ?? 0, active: isActive, color: hashColor(wt.path) });
         const color = new vscode.ThemeColor(hashColor(wt.path));
         item.iconPath = new vscode.ThemeIcon(working ? 'loading~spin' : idle ? 'sparkle' : wt.isMain ? 'home' : 'git-branch', color);
 
         const bits = [];
         if (title !== wtLabel(wt)) bits.push(wtLabel(wt));
-        if (session?.prNumber) bits.push(`#${session.prNumber}`);
+        if (ownPr) bits.push(`#${ownPr.number}`);
         const sync = `${st?.ahead ? `↑${st.ahead}` : ''}${st?.behind ? `↓${st.behind}` : ''}`;
         if (sync) bits.push(sync);
         if (wt.locked) bits.push('locked');
@@ -1014,7 +1096,7 @@ class WorktreeTree {
         const md = new vscode.MarkdownString();
         md.appendMarkdown(`**${title}**\n\n`);
         md.appendMarkdown(`$(git-branch) \`${wtLabel(wt)}\`${wt.isMain ? ' — main checkout' : ''}\n\n`);
-        if (session?.prUrl) md.appendMarkdown(`$(git-pull-request) [#${session.prNumber}](${session.prUrl})\n\n`);
+        for (const p of prs) md.appendMarkdown(`$(git-pull-request) [#${p.number}](${p.url}) ${p.title ?? ''}\n\n`);
         if (st?.upstream) md.appendMarkdown(`$(cloud) \`${st.upstream}\` ↑${st.ahead} ↓${st.behind}\n\n`);
         md.appendMarkdown(`$(diff) ${staged} staged · ${unstaged} changed\n\n`);
         md.appendMarkdown(`$(terminal) ${terms.length ? terms.map((t) => deck.displayName(t)).join(', ') : 'no terminals'}`);
@@ -1024,12 +1106,21 @@ class WorktreeTree {
         md.supportThemeIcons = true;
         md.supportHtml = true;
         item.tooltip = md;
-        item.contextValue = (wt.isMain ? 'worktreeMain' : 'worktree') + (session?.prUrl ? ' hasPr' : '');
+        item.contextValue = (wt.isMain ? 'worktreeMain' : 'worktree') + (prs.length ? ' hasPr' : '');
         // No command on purpose: a click toggles the dropdown, and selection switches the terminal.
         return item;
       }
 
       case 'section': {
+        if (el.section === 'prs') {
+          const n = (deck.prs.get(el.wt.path) ?? []).length;
+          const item = new vscode.TreeItem('Pull Requests', n ? Expanded : None);
+          item.id = el.id;
+          item.description = n ? String(n) : 'none';
+          item.iconPath = new vscode.ThemeIcon('git-pull-request');
+          item.contextValue = 'prsSection';
+          return item;
+        }
         const n = deck.terminalsOf(el.wt.path).length;
         const item = new vscode.TreeItem('Terminals', Expanded);
         item.id = el.id;
@@ -1073,6 +1164,25 @@ class WorktreeTree {
             : '';
         item.contextValue = 'terminal';
         item.command = { command: 'agentDeck.showTerminal', title: 'Show Terminal', arguments: [el] };
+        return item;
+      }
+
+      case 'pr': {
+        const pr = el.pr;
+        const state = pr.isDraft && pr.state === 'OPEN' ? 'DRAFT' : pr.state;
+        const look = {
+          OPEN: ['git-pull-request', 'charts.green', 'open'],
+          DRAFT: ['git-pull-request-draft', 'descriptionForeground', 'draft'],
+          MERGED: ['git-merge', 'charts.purple', 'merged'],
+          CLOSED: ['git-pull-request-closed', 'charts.red', 'closed'],
+        }[state ?? ''] ?? ['git-pull-request', 'descriptionForeground', ''];
+        const item = new vscode.TreeItem(`#${pr.number}  ${pr.title ?? ''}`.trim(), None);
+        item.id = el.id;
+        item.iconPath = new vscode.ThemeIcon(look[0], new vscode.ThemeColor(look[1]));
+        item.description = [look[2], pr.own ? '' : 'from session'].filter(Boolean).join(' · ');
+        item.tooltip = new vscode.MarkdownString(`**#${pr.number}** ${pr.title ?? ''}\n\n${look[2]}${pr.own ? ' · this branch' : ' · linked in the Claude session'}\n\n${pr.url}`);
+        item.contextValue = 'pr';
+        item.command = { command: 'agentDeck.openPrLink', title: 'Open Pull Request', arguments: [el] };
         return item;
       }
 
@@ -1125,8 +1235,13 @@ class Decorations {
     switch (d.kind) {
       case 'file':
         return new vscode.FileDecoration(d.letter, undefined, new vscode.ThemeColor(d.colorId));
-      case 'wt':
-        return d.n ? new vscode.FileDecoration(d.n > 99 ? '99' : String(d.n), `${d.n} changed file(s)`) : undefined;
+      case 'wt': {
+        // Badges hold at most 2 characters: "●3" when active, the plain count otherwise.
+        const count = d.n ? (d.n > 99 ? '99' : String(d.n)) : '';
+        const badge = d.active ? (d.n > 9 ? count : `●${count}`) : count;
+        const tooltip = [d.active ? 'active worktree' : '', d.n ? `${d.n} changed file(s)` : ''].filter(Boolean).join(' · ');
+        return new vscode.FileDecoration(badge || undefined, tooltip || undefined, d.active ? new vscode.ThemeColor(d.color) : undefined);
+      }
       case 'muted':
         return new vscode.FileDecoration(undefined, undefined, new vscode.ThemeColor('descriptionForeground'));
     }
@@ -1237,10 +1352,12 @@ function activate(ctx) {
       const n = deck.changesOf(wt.path, 'unstaged').length + deck.changesOf(wt.path, 'staged').length;
       status.text = `$(git-branch) ${wtTitle(wt, deck)}${n ? ` ±${n}` : ''}`;
       status.show();
+      view.description = wtTitle(wt, deck);
       filesView.description = wtLabel(wt);
       filesView.message = undefined;
     } else {
       status.hide();
+      view.description = undefined;
       filesView.description = undefined;
       filesView.message = deck.repos.length ? 'Select a worktree.' : undefined;
     }
@@ -1594,8 +1711,14 @@ function activate(ctx) {
     }),
     vscode.commands.registerCommand('agentDeck.openPr', (arg) => {
       const wt = resolveWt(arg);
-      const url = wt && deck.sessions.get(wt.path)?.prUrl;
+      const url = wt && (deck.prs.get(wt.path) ?? [])[0]?.url;
       if (url) vscode.env.openExternal(vscode.Uri.parse(url));
+    }),
+    vscode.commands.registerCommand('agentDeck.openPrLink', (/** @type {PrNode} */ n) => {
+      if (n?.pr.url) vscode.env.openExternal(vscode.Uri.parse(n.pr.url));
+    }),
+    vscode.commands.registerCommand('agentDeck.copyPrLink', (/** @type {PrNode} */ n) => {
+      if (n?.pr.url) vscode.env.clipboard.writeText(n.pr.url);
     }),
     vscode.workspace.onDidChangeConfiguration((e) => e.affectsConfiguration('agentDeck.worktreeLabel') && tree._onDidChange.fire(undefined)),
     vscode.commands.registerCommand('agentDeck.copyPath', (arg) => {
@@ -1617,7 +1740,7 @@ function activate(ctx) {
     }
   });
 
-  return { deck, tree, view };
+  return { deck, tree, view, decorations: new Decorations() };
 }
 
 function deactivate() {}

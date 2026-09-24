@@ -178,6 +178,18 @@
         "title": "Open Pull Request",
         "icon": "$(git-pull-request)",
         "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.openPrLink",
+        "title": "Open Pull Request",
+        "icon": "$(link-external)",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.copyPrLink",
+        "title": "Copy Link",
+        "icon": "$(copy)",
+        "category": "Agent Deck"
       }
     ],
     "menus": {
@@ -328,6 +340,21 @@
           "command": "agentDeck.openPr",
           "when": "view == agentDeck.worktrees && viewItem =~ /hasPr/",
           "group": "1_main@3"
+        },
+        {
+          "command": "agentDeck.copyPrLink",
+          "when": "view == agentDeck.worktrees && viewItem == pr",
+          "group": "inline@1"
+        },
+        {
+          "command": "agentDeck.openPrLink",
+          "when": "view == agentDeck.worktrees && viewItem == pr",
+          "group": "1_main@1"
+        },
+        {
+          "command": "agentDeck.copyPrLink",
+          "when": "view == agentDeck.worktrees && viewItem == pr",
+          "group": "1_main@2"
         }
       ],
       "commandPalette": [
@@ -377,6 +404,14 @@
         },
         {
           "command": "agentDeck.openPr",
+          "when": "false"
+        },
+        {
+          "command": "agentDeck.openPrLink",
+          "when": "false"
+        },
+        {
+          "command": "agentDeck.copyPrLink",
           "when": "false"
         }
       ]
