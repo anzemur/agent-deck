@@ -639,5 +639,43 @@ exports.run = async function () {
     assert.ok(!wtModel(target).sections.find((s) => s.kind === 'terminals').terminals.some((x) => x.external), 'gone when the session ends');
     console.log('✓ …and disappears when that session ends');
   }
+
+  // Bring here: a session from another app is ended there and resumed in a terminal in this window.
+  {
+    const fsx = require('fs');
+    const cpx = require('child_process');
+    const target = deck.worktrees.find((w) => !w.isMain);
+    const fake = (id, status) => {
+      const child = cpx.spawn(`${process.env.AGENT_DECK_TEST_BIN}/claude`, ['120'], { cwd: target.path, env: { ...process.env, SUPERSET_TERMINAL_ID: id }, detached: true, stdio: 'ignore' });
+      const pdir = path.join(process.env.AGENT_DECK_CLAUDE_PROJECTS, target.path.replace(/[^a-zA-Z0-9]/g, '-'));
+      fsx.mkdirSync(pdir, { recursive: true });
+      fsx.writeFileSync(path.join(pdir, `${id}.jsonl`), JSON.stringify({ type: 'user', cwd: target.path }) + '\n');
+      const write = (st) => fsx.writeFileSync(path.join(process.env.AGENT_DECK_CLAUDE_SESSIONS, `${child.pid}.json`), JSON.stringify({ pid: child.pid, sessionId: id, cwd: target.path, status: st, statusUpdatedAt: Date.now() }));
+      write(status);
+      return { child, write };
+    };
+    const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    const idle = fake('move-idle', 'idle');
+    await deck.poll();
+    assert.ok(deck.externals.some((e) => e.sessionId === 'move-idle'));
+    const t = await vscode.commands.executeCommand('agentDeck.bringHere', { sessionId: 'move-idle' });
+    assert.ok(t, 'terminal created here');
+    await until(() => !alive(idle.child.pid), 'ended in the other app');
+    await until(() => cpx.spawnSync('pgrep', ['-f', 'claude 120 --resume move-idle']).stdout.toString().trim(), 'resumed here', 15000);
+    assert.strictEqual(deck.worktreeOf(t)?.path, target.path);
+    console.log('✓ bring here: idle session ended in "Superset" and resumed in a terminal in its worktree here');
+
+    const busy = fake('move-busy', 'busy');
+    await deck.poll();
+    const res = await vscode.commands.executeCommand('agentDeck.bringAllHere', { quiet: true });
+    assert.deepStrictEqual(res, { moved: 0, queued: 1 });
+    assert.ok(alive(busy.child.pid), 'a working session is not interrupted');
+    assert.match(wtModel(target).sections.find((s) => s.kind === 'terminals').terminals.find((x) => x.external).sub, /moves here when idle/);
+    busy.write('idle');
+    await deck.poll();
+    await until(() => cpx.spawnSync('pgrep', ['-f', 'claude 120 --resume move-busy']).stdout.toString().trim(), 'moved once idle', 15000);
+    assert.ok(!alive(busy.child.pid));
+    console.log('✓ bring all here: a working session is queued ("moves here when idle") and moves the moment it goes idle');
+  }
   console.log('ALL PASSED');
 };

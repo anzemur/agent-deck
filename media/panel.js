@@ -67,10 +67,10 @@
           ? s.terminals
               .map((t) =>
                 t.external
-                  ? `<div class="row" tabindex="-1" data-cmd="agentDeck.openExternal" data-arg="${esc(JSON.stringify(t.external))}" title="Claude session running in ${esc(t.name)} — click to switch there">
+                  ? `<div class="row" tabindex="-1" data-cmd="agentDeck.bringHere" data-arg="${esc(JSON.stringify(t.external))}" title="Claude session running in ${esc(t.name)} — click to bring it here (resumes in a terminal in this window)">
                 ${ci(t.icon, t.spin ? 'spin' : t.attention ? 'attn' : '', t.attention ? '' : `color:${w.colorVar}`)}
                 <span class="grow"><span class="name">${esc(t.name)}</span><span class="sub ${t.attention ? 'attn' : ''}">${esc(t.sub)}</span></span>
-                <span class="end muted">${ci('link-external')}</span>
+                <span class="actions">${act('arrow-down', 'Bring here', 'agentDeck.bringHere', t.external)}${act('link-external', `Show in ${t.name}`, 'agentDeck.openExternal', t.external)}</span>
               </div>`
                   : `<div class="row" tabindex="-1" data-cmd="agentDeck.showTerminal" data-arg="${esc(JSON.stringify({ termId: t.id }))}"
                   data-term="${esc(t.id)}" data-vscode-context="${ctx({ webviewSection: 'terminal', termId: t.id })}">

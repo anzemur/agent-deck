@@ -245,6 +245,17 @@
         "command": "agentDeck.openExternal",
         "title": "Show Agent in Its App",
         "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.bringHere",
+        "title": "Bring Session Here",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.bringAllHere",
+        "title": "Bring All Sessions Here (from Superset, iTerm, \u2026)",
+        "icon": "$(arrow-circle-down)",
+        "category": "Agent Deck"
       }
     ],
     "menus": {
@@ -298,6 +309,11 @@
           "command": "agentDeck.sortDefault",
           "when": "view == agentDeck.worktrees && agentDeck.sortAttention",
           "group": "navigation@4"
+        },
+        {
+          "command": "agentDeck.bringAllHere",
+          "when": "view == agentDeck.worktrees",
+          "group": "1_more@3"
         }
       ],
       "commandPalette": [
@@ -359,6 +375,10 @@
         },
         {
           "command": "agentDeck.openExternal",
+          "when": "false"
+        },
+        {
+          "command": "agentDeck.bringHere",
           "when": "false"
         }
       ],

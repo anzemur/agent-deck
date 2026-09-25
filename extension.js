@@ -1635,7 +1635,7 @@ function buildModel(deck, termId) {
             icon: att ? 'bell-dot' : busy ? 'loading' : 'sparkle',
             spin: !att && busy,
             attention: !!att,
-            sub: `claude · ${att ? attentionText(att) : busy ? 'working' : 'idle'}`,
+            sub: `claude · ${att ? attentionText(att) : busy ? 'working' : 'idle'}${deck.pendingMoves?.has(e.sessionId) ? ' · moves here when idle' : ''}`,
           };
         }),
       ),
@@ -2265,6 +2265,91 @@ function activate(ctx) {
     }),
   );
 
+  // ---- bring sessions from other apps (Superset, iTerm, …) into this window --------------------------
+
+  /** Session ids to move as soon as they go idle ("Move when idle"). */
+  const pendingMoves = new Set();
+  deck.pendingMoves = pendingMoves; // the panel shows "moves here when idle"
+
+  /**
+   * Ends a Claude session running in another app and resumes the same conversation in a new
+   * terminal here, in its worktree. The other app's terminal is left at a shell prompt.
+   * @param {ExternalAgent} e
+   * @returns {Promise<vscode.Terminal | undefined>}
+   */
+  const moving = new Set();
+  const adoptExternal = async (e) => {
+    const wt = deck.findWorktree(e.wtPath);
+    if (!wt || moving.has(e.sessionId)) return undefined;
+    moving.add(e.sessionId);
+    try {
+      return await adoptExternalNow(e, wt);
+    } finally {
+      moving.delete(e.sessionId);
+    }
+  };
+  const adoptExternalNow = async (e, wt) => {
+    const dir = resumeDirFor(e.sessionId, [e.cwd, wt.path, ...deck.worktrees.map((w) => w.path)]) ?? e.cwd;
+    // Stop it there first: two processes on one conversation would both write to it.
+    const alive = () => {
+      try {
+        process.kill(e.pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    try {
+      process.kill(e.pid, 'SIGTERM');
+    } catch {}
+    for (let i = 0; i < 50 && alive(); i++) await new Promise((r) => setTimeout(r, 100));
+    if (alive()) {
+      try {
+        process.kill(e.pid, 'SIGKILL');
+      } catch {}
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    if (alive()) {
+      vscode.window.showErrorMessage(`Agent Deck: couldn't stop the session in ${e.app}; not moving it.`);
+      return undefined;
+    }
+    pendingMoves.delete(e.sessionId);
+    deck.markExternalSeen(e.sessionId);
+    const startup = /** @type {string} */ (vscode.workspace.getConfiguration('agentDeck').get('startupCommand') ?? '').trim();
+    const base = startup.startsWith('claude') || startup.includes('/claude') ? startup : 'claude';
+    deck.setActive(wt.path);
+    const t = deck.createTerminal(wt, { command: `${base} --resume ${e.sessionId}`, cwd: dir, plain: true });
+    setTimeout(() => deck.poll(), 2500);
+    return t;
+  };
+
+  /** Move one external session here; asks first if it's in the middle of something. */
+  const bringHere = async (e, { quiet = false } = {}) => {
+    if (e.status === 'idle') return adoptExternal(e);
+    if (quiet) {
+      pendingMoves.add(e.sessionId);
+      return undefined;
+    }
+    const doing = e.status === 'waiting' ? 'waiting for your answer' : 'working';
+    const choice = await vscode.window.showWarningMessage(
+      `Claude in ${e.app} is ${doing}.`,
+      { modal: true, detail: 'Moving it now stops the current step (the conversation is kept and resumes here). Or move it the moment it goes idle.' },
+      'Move When Idle',
+      'Move Now',
+    );
+    if (choice === 'Move Now') return adoptExternal(e);
+    if (choice === 'Move When Idle') {
+      pendingMoves.add(e.sessionId);
+      panel.schedule();
+    }
+    return undefined;
+  };
+
+  // Deferred moves: as soon as a waiting-to-move session is idle, bring it over.
+  deck.onChange(() => {
+    for (const e of deck.externals) if (pendingMoves.has(e.sessionId) && e.status === 'idle') adoptExternal(e);
+  });
+
   // ---- optional: close other worktrees' tabs when switching ----------------------------------------
 
   /**
@@ -2612,6 +2697,37 @@ function activate(ctx) {
       t.show(false);
       deck.markSeen(t);
     }),
+    vscode.commands.registerCommand('agentDeck.bringHere', async (arg) => {
+      const e = deck.externals.find((x) => x.sessionId === arg?.sessionId);
+      if (!e) return vscode.window.showInformationMessage('Agent Deck: that session is no longer running.');
+      return bringHere(e);
+    }),
+    vscode.commands.registerCommand('agentDeck.bringAllHere', async (arg) => {
+      await deck.poll();
+      const all = [...deck.externals];
+      if (!all.length) return vscode.window.showInformationMessage('Agent Deck: no Claude sessions from other apps in this repo.');
+      const idle = all.filter((e) => e.status === 'idle');
+      const busy = all.filter((e) => e.status !== 'idle');
+      if (!arg?.quiet) {
+        const ok = await vscode.window.showWarningMessage(
+          `Bring ${all.length} Claude session${all.length === 1 ? '' : 's'} here?`,
+          {
+            modal: true,
+            detail: [
+              idle.length ? `${idle.length} idle: moved now (ended in their app, resumed here).` : '',
+              busy.length ? `${busy.length} busy: moved the moment they go idle.` : '',
+              `From: ${[...new Set(all.map((e) => e.app))].join(', ')}.`,
+            ].filter(Boolean).join('\n'),
+          },
+          'Bring Here',
+        );
+        if (ok !== 'Bring Here') return;
+      }
+      for (const e of idle) await adoptExternal(e);
+      for (const e of busy) pendingMoves.add(e.sessionId);
+      panel.schedule();
+      return { moved: idle.length, queued: busy.length };
+    }),
     vscode.commands.registerCommand('agentDeck.openExternal', (arg) => {
       if (arg?.sessionId) deck.markExternalSeen(arg.sessionId);
       if (arg?.bundle) execFile('/usr/bin/open', ['-b', arg.bundle], () => {});
@@ -2906,7 +3022,7 @@ function activate(ctx) {
     await offerRefreshAfterReload();
   });
 
-  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh, goTo, focusByPid, home, openHome, closeOtherWorktreeTabs, readClipboardImage, appOfProcess, transientNotice, alertItem, ensureNotifier: () => ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')) };
+  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh, goTo, focusByPid, home, openHome, closeOtherWorktreeTabs, readClipboardImage, appOfProcess, adoptExternal, pendingMoves, transientNotice, alertItem, ensureNotifier: () => ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')) };
 }
 
 function deactivate() {}
