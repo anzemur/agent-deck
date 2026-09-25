@@ -494,7 +494,7 @@
         "agentDeck.baseBranch": {
           "type": "string",
           "default": "",
-          "description": "Branch new worktrees start from, e.g. origin/main. Empty = the remote's default branch (fetched first for New Task), or the main checkout's HEAD if there's no remote."
+          "description": "Branch new worktrees start from, e.g. origin/main. Empty = the remote's default branch (e.g. origin/staging). It is always fetched first, so new work starts from the latest version. No remote = the main checkout's HEAD."
         },
         "agentDeck.branchTemplate": {
           "type": "string",

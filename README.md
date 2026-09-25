@@ -24,7 +24,7 @@ Worktrees and terminals, linked, for running many coding agents at once in VS Co
 | `agentDeck.startupCommand` | `claude` | run in the first terminal of a worktree (extra terminals are plain shells); empty = never |
 | `agentDeck.showOnStartup` | `true` | open the Agent Deck sidebar when the window opens or reloads |
 | `agentDeck.worktreeLabel` | `title` | `title` = Claude session title, `branch` = branch name |
-| `agentDeck.baseBranch` | `""` | where new branches start; empty = remote default branch (e.g. origin/staging) |
+| `agentDeck.baseBranch` | `""` | where new branches start, always freshly fetched; empty = remote default branch (e.g. origin/staging) |
 | `agentDeck.branchTemplate` | `""` | New Task branch name, e.g. `anze/{type}/{slug}`; empty = follow the repo's recent branches |
 | `agentDeck.worktreeParentDir` | `""` | where new worktrees go |
 

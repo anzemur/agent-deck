@@ -1629,10 +1629,10 @@ function activate(ctx) {
   };
 
   /**
-   * Creates (or checks out) `branch` as a new worktree next to the repo and returns it.
-   * `fresh`: fetch the base first so the task starts from the latest remote default branch.
+   * Creates (or checks out) `branch` as a new worktree next to the repo and returns it. A new
+   * branch always starts from a freshly fetched base (e.g. the latest origin/staging).
    */
-  const createWorktree = async (repo, branch, { fresh = false } = {}) => {
+  const createWorktree = async (repo, branch) => {
     const setting = /** @type {string} */ (vscode.workspace.getConfiguration('agentDeck').get('worktreeParentDir') ?? '').trim();
     const parent = setting ? expandHome(setting) : path.join(path.dirname(repo.root), `${repo.name}.worktrees`);
     let target = path.join(parent, branch.split('/').pop() || branch.replace(/\//g, '-'));
@@ -1642,7 +1642,7 @@ function activate(ctx) {
     try {
       fs.mkdirSync(parent, { recursive: true });
       await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Creating worktree ${branch}…` }, async (p) => {
-        if (fresh && !exists && base.remote) {
+        if (!exists && base.remote) {
           p.report({ message: `fetching ${base.remote}` });
           const [remote, ...rest] = base.remote.split('/');
           await git(repo.root, ['fetch', '--quiet', remote, rest.join('/')]).catch(() => {}); // offline is fine
@@ -2001,7 +2001,7 @@ function activate(ctx) {
         });
       }
       if (!branch?.trim()) return;
-      const wt = await createWorktree(repo, branch.trim(), { fresh: true });
+      const wt = await createWorktree(repo, branch.trim());
       if (!wt) return;
 
       deck.taskTitles.set(wt.path, task.trim().replace(/\s+/g, ' ').slice(0, 80));
