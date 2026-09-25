@@ -610,12 +610,8 @@ async function suggestBranch(repo, text) {
  * @returns {Promise<{ commands: string[], source: string }>}
  */
 async function setupFor(repo) {
-  for (const rel of ['.agent-deck/config.json', '.superset/config.json']) {
-    try {
-      const cfg = JSON.parse(fs.readFileSync(path.join(repo.root, rel), 'utf8'));
-      if (Array.isArray(cfg.setup)) return { commands: cfg.setup.map(String), source: rel };
-    } catch {}
-  }
+  const cfg = repoConfig(repo);
+  if (cfg && Array.isArray(cfg.data.setup)) return { commands: cfg.data.setup.map(String), source: cfg.source };
   const commands = [];
   const ignored = await git(repo.root, ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory']).catch(() => '');
   for (const f of ignored.split('\n').filter((l) => /(^|\/)\.env(\.[^/]+)?$/.test(l))) {
@@ -628,6 +624,38 @@ async function setupFor(repo) {
   else if (has('yarn.lock')) commands.push('yarn install');
   else if (has('package-lock.json')) commands.push('npm install');
   return { commands, source: 'auto' };
+}
+
+/** The repo's worktree config: .agent-deck/config.json, else Superset's .superset/config.json. */
+function repoConfig(repo) {
+  for (const rel of ['.agent-deck/config.json', '.superset/config.json']) {
+    try {
+      return { data: JSON.parse(fs.readFileSync(path.join(repo.root, rel), 'utf8')), source: rel };
+    } catch {}
+  }
+  return undefined;
+}
+
+/** Env the setup/teardown scripts see: where the main checkout is (Superset's name too). */
+function scriptEnv(repo) {
+  return { AGENT_DECK_ROOT_PATH: repo.root, SUPERSET_ROOT_PATH: repo.root };
+}
+
+/**
+ * Runs the repo's `teardown` list inside a worktree that is about to be deleted, in your login
+ * shell so tools like bun/docker are on PATH. Never throws; returns what failed, if anything.
+ * @returns {Promise<{ ran: number, error?: string }>}
+ */
+function runTeardown(repo, wtPath) {
+  const cfg = repoConfig(repo);
+  const cmds = Array.isArray(cfg?.data.teardown) ? cfg.data.teardown.map(String) : [];
+  if (!cmds.length) return Promise.resolve({ ran: 0 });
+  const shell = process.env.SHELL || '/bin/zsh';
+  return new Promise((resolve) => {
+    execFile(shell, ['-lc', cmds.join(' && ')], { cwd: wtPath, env: { ...process.env, ...scriptEnv(repo) }, timeout: 5 * 60 * 1000 }, (err, _out, stderr) =>
+      resolve({ ran: cmds.length, error: err ? (stderr || err.message).trim().split('\n').slice(-3).join(' ') : undefined }),
+    );
+  });
 }
 
 /** Single-quote for POSIX shells. */
@@ -1965,14 +1993,21 @@ function activate(ctx) {
     vscode.commands.registerCommand('agentDeck.newWorktree', async (arg) => {
       const repo = (arg?.wtPath && deck.findWorktree(arg.wtPath)?.repo) ?? (await pickRepo());
       if (!repo) return;
-      const branch = await vscode.window.showInputBox({
+      const branch = arg?.branch ?? (await vscode.window.showInputBox({
         prompt: `New worktree in ${repo.name}: branch name (existing branches are checked out, new ones start from ${await baseRefLabel(repo)})`,
         placeHolder: 'feat/my-agent-task',
         validateInput: validateBranch,
-      });
+      }));
       if (!branch) return;
       const wt = await createWorktree(repo, branch.trim());
-      if (wt) deck.switchTo(wt.path);
+      if (!wt) return;
+      // Same setup as New Task, then the usual first-terminal command (claude by default).
+      const { commands } = await setupFor(repo);
+      const startup = /** @type {string} */ (vscode.workspace.getConfiguration('agentDeck').get('startupCommand') ?? '').trim();
+      const setup = commands.length ? `{ ${commands.join(' && ')}; }` : '';
+      deck.setActive(wt.path);
+      deck.createTerminal(wt, { command: [setup, startup].filter(Boolean).join(' ; ') || undefined, plain: true, env: scriptEnv(repo) });
+      return wt.path;
     }),
 
     vscode.commands.registerCommand('agentDeck.newTask', async (arg) => {
@@ -2017,7 +2052,7 @@ function activate(ctx) {
       deck.createTerminal(wt, {
         command: `${setup}${agent} ${sq(task.trim())}`,
         plain: true,
-        env: { AGENT_DECK_ROOT_PATH: repo.root, SUPERSET_ROOT_PATH: repo.root },
+        env: scriptEnv(repo),
       });
       if (!arg?.prompt) {
         vscode.window.setStatusBarMessage(`Agent Deck: ${wtLabel(wt)} created${commands.length ? `, setup from ${source}` : ''}, Claude started`, 6000);
@@ -2041,6 +2076,11 @@ function activate(ctx) {
       );
       if (!choice) return;
       terms.forEach((t) => t.dispose());
+      const teardown = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: `Running teardown for ${wtLabel(wt)}…` },
+        () => runTeardown(wt.repo, wt.path),
+      );
+      if (teardown.error) vscode.window.showWarningMessage(`Agent Deck: teardown failed (${teardown.error}). Deleting the worktree anyway.`);
       const runRemove = (force) => git(wt.repo.root, ['worktree', 'remove', ...(force ? ['--force'] : []), wt.path]);
       try {
         await runRemove(false);
@@ -2125,7 +2165,7 @@ function activate(ctx) {
     }
   });
 
-  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker };
+  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown };
 }
 
 function deactivate() {}

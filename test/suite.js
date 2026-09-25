@@ -404,5 +404,22 @@ exports.run = async function () {
     assert.ok(!fsx.existsSync(path.join(second, '.env')), 'automatic setup did not run');
     console.log('✓ New Task uses the repo\'s .superset/config.json setup when present; branch names never collide (…-2)');
   }
+
+  // + New Worktree runs the same setup; deleting a worktree runs the repo's teardown list first.
+  {
+    const fsx = require('fs');
+    fsx.writeFileSync(path.join(main.path, '.superset/config.json'), JSON.stringify({
+      setup: ['cp "$SUPERSET_ROOT_PATH/.env" .env.from-script'],
+      teardown: ['touch "$AGENT_DECK_ROOT_PATH/torn-down-$(basename "$PWD")"'],
+    }));
+    const made = await vscode.commands.executeCommand('agentDeck.newWorktree', { wtPath: main.path, branch: 'plain-new' });
+    assert.ok(made && deck.findWorktree(made)?.branch === 'plain-new');
+    await until(() => fsx.existsSync(path.join(made, '.env.from-script')), '+ worktree setup ran', 15000);
+    console.log('✓ + New Worktree runs the repo setup script too');
+    const res = await ext.exports.runTeardown(deck.findWorktree(made).repo, made);
+    assert.deepStrictEqual(res, { ran: 1, error: undefined });
+    assert.ok(fsx.existsSync(path.join(main.path, `torn-down-${path.basename(made)}`)));
+    console.log('✓ teardown list runs inside the worktree (with the root path set) before it is deleted');
+  }
   console.log('ALL PASSED');
 };
