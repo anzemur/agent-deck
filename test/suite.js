@@ -475,8 +475,11 @@ exports.run = async function () {
     oldBusy.sendText('sleep 60');
     const before = new Set([oldIdle, oldBusy]);
     let stale;
-    await until(async () => (stale = await ext.exports.staleAfterReload(before)).some((p) => p.t === oldIdle), 'restored shell settled', 20000);
-    assert.ok(!stale.some((p) => p.t === oldBusy), 'busy terminal not offered');
+    // Wait until the idle shell has settled and the other one is actually running its command.
+    await until(async () => {
+      stale = await ext.exports.staleAfterReload(before);
+      return stale.some((p) => p.t === oldIdle) && !stale.some((p) => p.t === oldBusy);
+    }, 'restored shells settled', 20000);
     assert.ok(stale.every((p) => before.has(p.t)), 'only terminals from before the reload');
     ext.exports.applyRefresh(stale);
     await until(() => oldIdle.exitStatus !== undefined || !vscode.window.terminals.includes(oldIdle), 'old one closed');
@@ -484,6 +487,27 @@ exports.run = async function () {
     assert.ok(vscode.window.terminals.some((t) => t !== oldIdle && deck.worktreeOf(t)?.path === a.path && t.creationOptions?.color));
     console.log('✓ after-reload refresh: only idle terminals from before the reload are replaced (fresh, coloured); busy one kept');
     oldBusy.dispose();
+  }
+
+  // Sort by attention: a worktree whose agent needs you jumps to the top; default order otherwise.
+  {
+    const target = deck.worktrees.find((w) => !w.isMain && deck.terminalsOf(w.path).length);
+    const orig = deck.attentionOf.bind(deck);
+    deck.attentionOf = (t) => (deck.worktreeOf(t)?.path === target.path ? { kind: 'waiting', since: 1, reason: 'permission prompt' } : undefined);
+    const cfg = vscode.workspace.getConfiguration('agentDeck');
+    await cfg.update('sortBy', 'default', vscode.ConfigurationTarget.Global);
+    const def = model().worktrees.map((w) => w.path);
+    assert.ok(def[0] !== target.path);
+    await vscode.commands.executeCommand('agentDeck.sortByAttention');
+    await until(() => model().worktrees[0].path === target.path, 'needs-you worktree on top');
+    const rest = model().worktrees.slice(1).map((w) => w.path);
+    assert.deepStrictEqual(rest.filter((p) => !deck.worktrees.some((w) => w.path === p && deck.terminalsOf(p).some((t) => deck.isWorking(t) || deck.isIdleAgent(t)))),
+      def.filter((p) => p !== target.path && !deck.worktrees.some((w) => w.path === p && deck.terminalsOf(p).some((t) => deck.isWorking(t) || deck.isIdleAgent(t)))));
+    console.log(`✓ sort by attention: "${path.basename(target.path)}" (needs you) moves from #${def.indexOf(target.path) + 1} to #1; the rest keep their order`);
+    await vscode.commands.executeCommand('agentDeck.sortDefault');
+    await until(() => model().worktrees.map((w) => w.path).join() === def.join(), 'back to default order');
+    console.log('✓ toggling back restores the default order');
+    deck.attentionOf = orig;
   }
   console.log('ALL PASSED');
 };

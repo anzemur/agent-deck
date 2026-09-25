@@ -1414,6 +1414,23 @@ function buildModel(deck, termId) {
       context: { webviewSection: 'worktree', wtPath: wt.path, isMain: wt.isMain, hasPr: prs.length > 0 },
     };
   });
+  if (vscode.workspace.getConfiguration('agentDeck').get('sortBy') === 'attention') {
+    // Needs you (blocked first, then done; longest waiting on top) → working → idle → the rest.
+    // Stable within each group (and within each repo), so rows only move when their state changes.
+    const rank = (w) => {
+      const terms = deck.terminalsOf(w.path);
+      const atts = terms.map((t) => deck.attentionOf(t)).filter(Boolean);
+      if (atts.some((a) => a?.kind === 'waiting')) return [0, Math.min(...atts.map((a) => a?.since ?? 0))];
+      if (atts.length) return [1, Math.min(...atts.map((a) => a?.since ?? 0))];
+      if (terms.some((t) => deck.isWorking(t))) return [2, 0];
+      if (terms.some((t) => deck.isIdleAgent(t))) return [3, 0];
+      return [4, 0];
+    };
+    const repoOrder = new Map(deck.repos.map((r, i) => [r.name, i]));
+    const ranked = worktrees.map((w, i) => ({ w, i, r: rank(w) }));
+    ranked.sort((x, y) => (repoOrder.get(x.w.repo) ?? 0) - (repoOrder.get(y.w.repo) ?? 0) || x.r[0] - y.r[0] || x.r[1] - y.r[1] || x.i - y.i);
+    return { worktrees: ranked.map((x) => x.w), active: deck.active, multiRepo: deck.repos.length > 1 };
+  }
   return { worktrees, active: deck.active, multiRepo: deck.repos.length > 1 };
 }
 
@@ -2051,6 +2068,17 @@ function activate(ctx) {
       applyRefresh(plan);
     }),
     vscode.commands.registerCommand('agentDeck.goToFileInWorktree', () => goToFile()),
+    vscode.commands.registerCommand('agentDeck.sortByAttention', () =>
+      vscode.workspace.getConfiguration('agentDeck').update('sortBy', 'attention', vscode.ConfigurationTarget.Global),
+    ),
+    vscode.commands.registerCommand('agentDeck.sortDefault', () =>
+      vscode.workspace.getConfiguration('agentDeck').update('sortBy', 'default', vscode.ConfigurationTarget.Global),
+    ),
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (!e.affectsConfiguration('agentDeck.sortBy')) return;
+      syncSortContext();
+      panel.schedule();
+    }),
     vscode.commands.registerCommand('agentDeck.findInWorktree', () => {
       // Scope Search to the active worktree. An absolute path in "files to include" also works for
       // worktrees outside the open folder (e.g. ~/.superset/worktrees/...). For the main checkout,
@@ -2304,6 +2332,11 @@ function activate(ctx) {
   if (vscode.workspace.getConfiguration('agentDeck').get('showOnStartup', true)) {
     vscode.commands.executeCommand('workbench.view.extension.agentDeck').then(undefined, () => {});
   }
+
+  // Header toggle shows the option you'd switch to.
+  const syncSortContext = () =>
+    vscode.commands.executeCommand('setContext', 'agentDeck.sortAttention', vscode.workspace.getConfiguration('agentDeck').get('sortBy') === 'attention');
+  syncSortContext();
 
   deck.refresh().then(async () => {
     updateChrome();

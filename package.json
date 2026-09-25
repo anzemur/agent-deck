@@ -216,6 +216,18 @@
         "title": "Clean Up Finished Worktrees\u2026",
         "icon": "$(trash)",
         "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.sortByAttention",
+        "title": "Sort: Needs You First",
+        "icon": "$(bell)",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.sortDefault",
+        "title": "Sort: Default Order",
+        "icon": "$(bell-slash)",
+        "category": "Agent Deck"
       }
     ],
     "menus": {
@@ -254,6 +266,16 @@
           "command": "agentDeck.cleanUpWorktrees",
           "when": "view == agentDeck.worktrees",
           "group": "1_more@2"
+        },
+        {
+          "command": "agentDeck.sortByAttention",
+          "when": "view == agentDeck.worktrees && !agentDeck.sortAttention",
+          "group": "navigation@4"
+        },
+        {
+          "command": "agentDeck.sortDefault",
+          "when": "view == agentDeck.worktrees && agentDeck.sortAttention",
+          "group": "navigation@4"
         }
       ],
       "commandPalette": [
@@ -516,6 +538,19 @@
           "type": "boolean",
           "default": true,
           "description": "After a window reload, offer (one notification) to refresh terminals that are out of date: idle Claude sessions are resumed in fresh terminals, empty shells reopened."
+        },
+        "agentDeck.sortBy": {
+          "type": "string",
+          "enum": [
+            "default",
+            "attention"
+          ],
+          "default": "default",
+          "enumDescriptions": [
+            "git's worktree order (main checkout first)",
+            "Needs you first, then working, then idle, then the rest"
+          ],
+          "description": "Order of worktrees in the panel. Also toggled from the bell in the Worktrees header."
         }
       }
     },
