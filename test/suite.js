@@ -677,5 +677,29 @@ exports.run = async function () {
     assert.ok(!alive(busy.child.pid));
     console.log('✓ bring all here: a working session is queued ("moves here when idle") and moves the moment it goes idle');
   }
+
+  // claude -w after /exit: the session's history sits in the main checkout's folder but it works
+  // in the worktree. The title/PR must stay on the worktree, not jump to main.
+  {
+    const fsx = require('fs');
+    const enc = (p) => p.replace(/[^a-zA-Z0-9]/g, '-');
+    const wtB = deck.findWorktree(b.path);
+    const mainDir = path.join(process.env.AGENT_DECK_CLAUDE_PROJECTS, enc(main.path));
+    fsx.mkdirSync(mainDir, { recursive: true });
+    fsx.writeFileSync(path.join(mainDir, 'main-own.jsonl'), [{ type: 'user', cwd: main.path }, { type: 'ai-title', aiTitle: 'Main checkout task' }].map((o) => JSON.stringify(o)).join('\n') + '\n');
+    await sleep(30);
+    fsx.writeFileSync(path.join(mainDir, 'moved-w.jsonl'), [
+      { type: 'user', cwd: b.path },
+      { type: 'ai-title', aiTitle: 'Worktree task (history moved to main)' },
+      { type: 'pr-link', prNumber: 777, prUrl: 'u777' },
+      { type: 'user', cwd: main.path },
+      { type: 'user', cwd: b.path },
+    ].map((o) => JSON.stringify(o)).join('\n') + '\n');
+    await deck.poll();
+    assert.strictEqual(wtModel(main).title, 'Main checkout task');
+    assert.strictEqual(wtModel(b).title, 'Worktree task (history moved to main)');
+    assert.ok(deck.sessions.get(b.path).prs.some((p) => p.number === 777) && !deck.sessions.get(main.path)?.prs.some((p) => p.number === 777));
+    console.log('✓ a claude -w session whose history moved to main after /exit still names its worktree, not main');
+  }
   console.log('ALL PASSED');
 };

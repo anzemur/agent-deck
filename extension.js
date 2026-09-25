@@ -49,7 +49,7 @@ const COLORS = [
 /** @typedef {{ wtPath: string | undefined, fromChild: boolean, agent: string | undefined, working: boolean, sessionId: string | undefined, hasChildren: boolean, status: string | undefined, waitingFor: string | undefined, statusSince: number | undefined }} ProcInfo */
 /** @typedef {{ kind: 'waiting' | 'done', since: number, reason: string | undefined }} Attention  agent needs you: blocked on a question/approval, or finished unseen work */
 /** @typedef {{ sessionId: string, wtPath: string, name: string }} AgentRecord  a Claude session to bring back after a restart */
-/** @typedef {{ title: string | undefined, prs: { number: number, url: string }[] }} SessionInfo */
+/** @typedef {{ title: string | undefined, prs: { number: number, url: string }[], cwd?: string }} SessionInfo  cwd = folder of its latest steps */
 /** @typedef {{ number: number, url: string, title: string | undefined, state: string | undefined, isDraft: boolean, own: boolean, headRefOid?: string }} PullRequest  own = this worktree's branch is its head */
 
 /** @typedef {'staged' | 'unstaged'} Group */
@@ -357,11 +357,14 @@ function resumeDirFor(sessionId, candidates) {
   try {
     dirs = fs.readdirSync(CLAUDE_PROJECTS);
   } catch {}
+  // A session's history can exist under more than one folder (claude -w moves it on /exit):
+  // prefer the candidates in the order given.
+  for (const c of candidates) {
+    if (fs.existsSync(path.join(CLAUDE_PROJECTS, enc(c), `${sessionId}.jsonl`))) return c;
+  }
   for (const d of dirs) {
     const file = path.join(CLAUDE_PROJECTS, d, `${sessionId}.jsonl`);
     if (!fs.existsSync(file)) continue;
-    const known = candidates.find((c) => enc(c) === d);
-    if (known) return known;
     // Stream the file in chunks: long sessions run to tens of MB and the matching cwd can be anywhere.
     const fd = fs.openSync(file, 'r');
     try {
@@ -405,7 +408,15 @@ function parseSession(file, stat) {
     /** @type {SessionInfo} */
     const info = { title: undefined, prs: [] };
     let custom, ai;
-    for (const line of buf.toString('utf8').split('\n')) {
+    const text = buf.toString('utf8');
+    // Where the session is working now: the last "cwd" it recorded.
+    const cwds = [...text.matchAll(/"cwd":"((?:[^"\\]|\\.)*)"/g)];
+    if (cwds.length) {
+      try {
+        info.cwd = JSON.parse(`"${cwds[cwds.length - 1][1]}"`);
+      } catch {}
+    }
+    for (const line of text.split('\n')) {
       // Cheap pre-filter; the transcript is mostly large message lines we don't care about.
       if (!line.includes('-title"') && !line.includes('"pr-link"')) continue;
       let o;
@@ -427,34 +438,55 @@ function parseSession(file, stat) {
   }
 }
 
-/** Title / PR of the most recently active Claude session in this worktree. */
-function readSessionInfo(wtPath) {
-  const dir = claudeProjectDir(wtPath);
-  let newest;
-  try {
-    for (const name of fs.readdirSync(dir)) {
-      if (!name.endsWith('.jsonl')) continue;
-      const file = path.join(dir, name);
-      const stat = fs.statSync(file);
-      if (!newest || stat.mtimeMs > newest.stat.mtimeMs) newest = { file, stat };
-    }
-  } catch {
-    return undefined;
-  }
-  if (!newest) return undefined;
-  const { file, stat } = newest;
+/** Parsed info for one transcript, cached by mtime/size. */
+function sessionInfoOf(file, stat) {
   const cached = sessionCache.get(file);
   if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.info;
   try {
     const info = parseSession(file, stat);
     // Keep what scrolled out of the tail on very long sessions.
     if (!info.title && cached?.info.title) info.title = cached.info.title;
+    if (!info.cwd && cached?.info.cwd) info.cwd = cached.info.cwd;
     for (const p of cached?.info.prs ?? []) if (!info.prs.some((q) => q.number === p.number)) info.prs.push(p);
     sessionCache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, info });
     return info;
   } catch {
     return cached?.info;
   }
+}
+
+/**
+ * Title / PRs of the most recently active Claude session *working in* this worktree.
+ * A session is attributed by where it's working (its latest cwd), not by which folder its history
+ * is saved under: `claude -w` sessions move their history back to the main checkout's folder on
+ * /exit but keep working in the worktree, so both folders are looked at.
+ * @param {Worktree} wt
+ * @param {(p: string) => Worktree | undefined} locate
+ */
+function readSessionInfo(wt, locate) {
+  const dirs = [...new Set([claudeProjectDir(wt.path), claudeProjectDir(wt.repo.root)])];
+  const files = [];
+  for (const dir of dirs) {
+    let names = [];
+    try {
+      names = fs.readdirSync(dir);
+    } catch {}
+    for (const name of names) {
+      if (!name.endsWith('.jsonl')) continue;
+      const file = path.join(dir, name);
+      try {
+        files.push({ file, stat: fs.statSync(file), own: dir === claudeProjectDir(wt.path) });
+      } catch {}
+    }
+  }
+  files.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+  for (const f of files.slice(0, 25)) {
+    const info = sessionInfoOf(f.file, f.stat);
+    if (!info) continue;
+    const owner = info.cwd ? locate(info.cwd) : undefined;
+    if (owner ? owner.path === wt.path : f.own) return info;
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------- pull requests (gh)
@@ -1068,7 +1100,7 @@ class Deck {
         this.status = new Map(statuses.filter(([, s]) => s).map(([p, s]) => [p, /** @type {WtStatus} */ (s)]));
         this.sessions = new Map();
         for (const w of this.worktrees) {
-          const info = readSessionInfo(w.path);
+          const info = readSessionInfo(w, (p) => this.worktreeContaining(p));
           if (info) this.sessions.set(w.path, info);
         }
         this.refreshPrs();
