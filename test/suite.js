@@ -509,5 +509,27 @@ exports.run = async function () {
     console.log('✓ toggling back restores the default order');
     deck.attentionOf = orig;
   }
+
+  // macOS notification: the app is built with its own name/id/icon, and its click link focuses the terminal.
+  {
+    const cpx = require('child_process');
+    const app = process.env.AGENT_DECK_NOTIFIER_APP;
+    assert.ok(await ext.exports.ensureNotifier(), 'notifier built');
+    const plist = path.join(app, 'Contents/Info.plist');
+    const read = (k) => cpx.execFileSync('/usr/libexec/PlistBuddy', ['-c', `Print :${k}`, plist]).toString().trim();
+    assert.strictEqual(read('CFBundleIdentifier'), 'dev.agentdeck.notifier');
+    assert.strictEqual(read('CFBundleDisplayName'), 'Agent Deck');
+    cpx.execFileSync('/usr/bin/codesign', ['--verify', '--deep', app]);
+    const hasLogo = require('fs').readdirSync(path.join(require('os').homedir(), '.cursor/extensions')).some((n) => n.startsWith('anthropic.claude-code-'));
+    console.log(`✓ notifier app built as "Agent Deck" (${read('CFBundleIdentifier')}), signature valid${hasLogo ? ', Claude icon' : ''}`);
+    const target = vscode.window.terminals.find((t) => deck.worktreeOf(t));
+    const other = vscode.window.terminals.find((t) => t !== target);
+    other.show();
+    await until(() => vscode.window.activeTerminal === other, 'focus elsewhere');
+    await ext.exports.focusByPid(await target.processId);
+    await until(() => vscode.window.activeTerminal === target, 'notification click focused the terminal');
+    assert.strictEqual(deck.active, deck.worktreeOf(target).path);
+    console.log('✓ clicking the notification (focus?pid=…) jumps to that agent\'s terminal and worktree');
+  }
   console.log('ALL PASSED');
 };

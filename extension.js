@@ -441,6 +441,98 @@ async function readPrs(wt, session) {
   return [...out.values()].sort((a, b) => Number(b.own) - Number(a.own) || b.number - a.number);
 }
 
+// ---------------------------------------------------------------- macOS notifications
+
+const NOTIFIER_ID = 'dev.agentdeck.notifier';
+const NOTIFIER_VERSION = '1';
+const NOTIFIER_APP = process.env.AGENT_DECK_NOTIFIER_APP || path.join(os.homedir(), '.agent-deck', 'Agent Deck.app');
+const NOTIFIER_BIN = path.join(NOTIFIER_APP, 'Contents', 'MacOS', 'terminal-notifier');
+const LSREGISTER = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister';
+
+/** The Claude logo shipped with the locally installed Claude Code extension (never redistributed). */
+function findClaudeLogo() {
+  for (const base of ['.cursor/extensions', '.vscode/extensions', '.vscode-insiders/extensions', '.windsurf/extensions']) {
+    const dir = path.join(os.homedir(), base);
+    let names = [];
+    try {
+      names = fs.readdirSync(dir).filter((n) => n.startsWith('anthropic.claude-code-')).sort().reverse();
+    } catch {}
+    for (const n of names) {
+      const p = path.join(dir, n, 'resources', 'claude-logo.png');
+      if (fs.existsSync(p)) return p;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Builds ~/.agent-deck/Agent Deck.app once: terminal-notifier (MIT, bundled in media/) renamed to
+ * "Agent Deck" with its own bundle id and the Claude logo as icon, so notifications show that name
+ * and icon, and clicks can open a link. macOS asks once whether it may send notifications.
+ * @param {string} zip path of the bundled terminal-notifier zip
+ * @returns {Promise<boolean>} whether the app is ready
+ */
+async function ensureNotifier(zip) {
+  const marker = path.join(NOTIFIER_APP, 'Contents', 'agent-deck-version');
+  try {
+    if (fs.readFileSync(marker, 'utf8') === NOTIFIER_VERSION) return true;
+  } catch {}
+  const sh = (cmd, args) => new Promise((res, rej) => execFile(cmd, args, (e, out, err) => (e ? rej(new Error(err || e.message)) : res(out))));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-deck-notifier-'));
+  try {
+    await sh('/usr/bin/ditto', ['-x', '-k', zip, tmp]);
+    fs.rmSync(NOTIFIER_APP, { recursive: true, force: true });
+    fs.mkdirSync(path.dirname(NOTIFIER_APP), { recursive: true });
+    fs.renameSync(path.join(tmp, 'terminal-notifier.app'), NOTIFIER_APP);
+    const plist = path.join(NOTIFIER_APP, 'Contents', 'Info.plist');
+    const pb = (c) => sh('/usr/libexec/PlistBuddy', ['-c', c, plist]).catch(() => {});
+    await pb(`Set :CFBundleIdentifier ${NOTIFIER_ID}`);
+    await pb('Set :CFBundleName Agent Deck');
+    await pb('Delete :CFBundleDisplayName');
+    await pb('Add :CFBundleDisplayName string Agent Deck');
+    const logo = findClaudeLogo();
+    if (logo) {
+      const set = path.join(tmp, 'icon.iconset');
+      fs.mkdirSync(set);
+      for (const s of [16, 32, 128, 256, 512]) {
+        await sh('/usr/bin/sips', ['-z', String(s), String(s), logo, '--out', path.join(set, `icon_${s}x${s}.png`)]);
+        await sh('/usr/bin/sips', ['-z', String(s * 2), String(s * 2), logo, '--out', path.join(set, `icon_${s}x${s}@2x.png`)]);
+      }
+      const iconName = String(await sh('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleIconFile', plist])).trim().replace(/\.icns$/, '');
+      await sh('/usr/bin/iconutil', ['-c', 'icns', set, '-o', path.join(NOTIFIER_APP, 'Contents', 'Resources', `${iconName}.icns`)]);
+    }
+    fs.writeFileSync(marker, NOTIFIER_VERSION); // before signing: anything added after breaks the seal
+    await sh('/usr/bin/codesign', ['--force', '--deep', '-s', '-', NOTIFIER_APP]); // our edits invalidated the original
+    if (!process.env.AGENT_DECK_NOTIFIER_APP) await sh(LSREGISTER, ['-f', NOTIFIER_APP]); // tests build a throwaway copy
+    return true;
+  } catch (e) {
+    console.error('[agent-deck] notifier build failed', e);
+    return false;
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Shows a macOS notification from "Agent Deck"; clicking it opens `url`.
+ * @returns {Promise<'ok' | 'denied' | 'failed'>}
+ */
+function sendMacNotification({ title, subtitle, message, url, group }) {
+  const args = ['-title', title, '-subtitle', subtitle, '-message', message, '-sound', 'Glass', '-group', group];
+  if (url) args.push('-open', url);
+  return new Promise((resolve) => {
+    execFile(NOTIFIER_BIN, args, { timeout: 15000 }, (err, _out, stderr) => {
+      if (!err) return resolve('ok');
+      resolve(/not allowed|turned off/i.test(String(stderr) + String(err.message)) ? 'denied' : 'failed');
+    });
+  });
+}
+
+/** First run: launch the app through macOS so it shows the one-time "allow notifications" prompt. */
+function requestNotificationPermission() {
+  execFile('/usr/bin/open', ['-a', NOTIFIER_APP, '--args', '-title', 'Agent Deck', '-subtitle', 'Notifications are on', '-message', "You'll hear from your agents when they finish or need you.", '-group', 'agent-deck-hello'], () => {});
+}
+
 // ---------------------------------------------------------------- misc helpers
 
 function expandHome(p) {
@@ -1870,10 +1962,29 @@ function activate(ctx) {
     const title = wtTitle(worktree, deck);
     vscode.window.showInformationMessage(`${title} — agent ${what}`, 'Show').then((c) => c && goTo(terminal));
     if (!vscode.window.state.focused && cfg.get('macNotifications', true) && process.platform === 'darwin') {
-      const q = (x) => JSON.stringify(String(x));
-      execFile('osascript', ['-e', `display notification ${q(`Agent ${what}`)} with title "Agent Deck" subtitle ${q(title)} sound name "Glass"`], () => {});
+      macNotify(terminal, worktree, attention, title, what);
     }
   });
+
+  /** macOS notification that opens Cursor on this agent's terminal when clicked. */
+  const macNotify = async (terminal, worktree, attention, title, what) => {
+    const pid = await Promise.race([terminal.processId, new Promise((r) => setTimeout(() => r(undefined), 500))]);
+    const subtitle = attention.kind === 'waiting' ? `${what[0].toUpperCase()}${what.slice(1)}` : 'Finished';
+    const message = `${deck.procs.get(terminal)?.agent ?? 'Agent'} · ${wtLabel(worktree)}`;
+    const url = pid ? `${vscode.env.uriScheme}://${ctx.extension.id}/focus?pid=${pid}` : undefined;
+    const ready = await ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip'));
+    const res = ready ? await sendMacNotification({ title, subtitle, message, url, group: `agent-deck-${pid ?? 'x'}` }) : 'failed';
+    if (res === 'ok') return;
+    // Not allowed yet (or couldn't build the app): plain notification, and a one-time hint.
+    const q = (x) => JSON.stringify(String(x));
+    execFile('osascript', ['-e', `display notification ${q(`${subtitle} · ${message}`)} with title "Agent Deck" subtitle ${q(title)} sound name "Glass"`], () => {});
+    if (res === 'denied' && !ctx.globalState.get('agentDeck.notifyHintShown')) {
+      ctx.globalState.update('agentDeck.notifyHintShown', true);
+      vscode.window
+        .showInformationMessage('Agent Deck: allow notifications for "Agent Deck" in System Settings → Notifications to get clickable alerts with the Claude icon.', 'Open Settings')
+        .then((c) => c && execFile('/usr/bin/open', ['x-apple.systempreferences:com.apple.Notifications-Settings.extension'], () => {}));
+    }
+  };
 
   /** Reflect the active terminal's worktree in the panel without stealing focus. */
   const syncFromTerminal = (t) => {
@@ -2333,6 +2444,29 @@ function activate(ctx) {
     vscode.commands.executeCommand('workbench.view.extension.agentDeck').then(undefined, () => {});
   }
 
+  const focusByPid = async (pid) => {
+    for (const t of vscode.window.terminals) {
+      if ((await t.processId) === pid) return goTo(t);
+    }
+  };
+  // Clicking a macOS notification opens <scheme>://anzemur.agent-deck/focus?pid=… : jump there.
+  ctx.subscriptions.push(
+    vscode.window.registerUriHandler({
+      handleUri(uri) {
+        if (uri.path === '/focus') return focusByPid(Number(new URLSearchParams(uri.query).get('pid')));
+      },
+    }),
+  );
+  // Build the notifier and ask macOS for permission once, up front, instead of on the first alert.
+  if (process.platform === 'darwin' && vscode.workspace.getConfiguration('agentDeck').get('macNotifications', true) && !process.env.AGENT_DECK_TEST_BIN) {
+    ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')).then((ok) => {
+      if (ok && !ctx.globalState.get('agentDeck.notifierAsked')) {
+        ctx.globalState.update('agentDeck.notifierAsked', true);
+        requestNotificationPermission();
+      }
+    });
+  }
+
   // Header toggle shows the option you'd switch to.
   const syncSortContext = () =>
     vscode.commands.executeCommand('setContext', 'agentDeck.sortAttention', vscode.workspace.getConfiguration('agentDeck').get('sortBy') === 'attention');
@@ -2352,7 +2486,7 @@ function activate(ctx) {
     await offerRefreshAfterReload();
   });
 
-  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh };
+  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh, goTo, focusByPid, ensureNotifier: () => ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')) };
 }
 
 function deactivate() {}
