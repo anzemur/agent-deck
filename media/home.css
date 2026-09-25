@@ -118,10 +118,10 @@ kbd {
   border: 0; border-radius: 999px; cursor: pointer; font: inherit; font-weight: 650;
   background: linear-gradient(180deg, var(--brand-hi), var(--brand-lo));
   color: #1d110c;
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.25) inset, 0 4px 14px color-mix(in srgb, var(--brand) 35%, transparent);
-  transition: filter 120ms, box-shadow 120ms;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.25) inset;
+  transition: filter 120ms;
 }
-.go:hover { filter: brightness(1.07); box-shadow: 0 1px 0 rgba(255, 255, 255, 0.3) inset, 0 6px 18px color-mix(in srgb, var(--brand) 45%, transparent); }
+.go:hover { filter: brightness(1.07); }
 .go:active { filter: brightness(0.96); }
 .go:disabled { opacity: 0.6; cursor: default; }
 .go:focus-visible, .card:focus-visible, .chip select:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
