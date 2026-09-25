@@ -511,6 +511,11 @@
           "type": "string",
           "default": "",
           "description": "Branch name for New Task, with {type} (feat, fix, refactor, \u2026) and {slug} (from the task). Empty = follow how this repo's recent branches are named, e.g. \"anze/{type}/{slug}\"."
+        },
+        "agentDeck.offerRefreshAfterReload": {
+          "type": "boolean",
+          "default": true,
+          "description": "After a window reload, offer (one notification) to refresh terminals that are out of date: idle Claude sessions are resumed in fresh terminals, empty shells reopened."
         }
       }
     },

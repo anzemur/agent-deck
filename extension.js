@@ -1589,6 +1589,8 @@ class FilesTree {
 function activate(ctx) {
   const deck = new Deck(ctx);
   const panel = new PanelProvider(ctx, deck);
+  /** Terminals that already existed when this window (re)loaded. */
+  const restoredTerminals = new Set(vscode.window.terminals);
   const files = new FilesTree(deck);
 
   const filesView = vscode.window.createTreeView('agentDeck.files', { treeDataProvider: files, showCollapseAll: false });
@@ -1782,6 +1784,55 @@ function activate(ctx) {
     if (deck.active === wt.path) deck.setActive(wt.repo.root);
     await deck.refresh();
     return {};
+  };
+
+  /** Swap each planned terminal for a fresh one (resuming idle Claude sessions); keeps focus. */
+  const applyRefresh = (plan) => {
+    const active = vscode.window.activeTerminal;
+    let focus;
+    for (const p of plan) {
+      const fresh = deck.createTerminal(p.wt, { show: false, name: p.name, command: p.command, cwd: p.cwd, plain: true });
+      if (p.t === active) focus = fresh;
+      p.t.dispose();
+    }
+    focus?.show(true);
+    setTimeout(() => deck.poll(), 3000);
+    return plan.length;
+  };
+
+  /**
+   * Terminals that survived a window reload carry the previous environment (the Claude Code
+   * extension picks a new port on every load), which the editor flags with ⚠. Of those, the ones
+   * Refresh can safely replace: idle Claude sessions and empty shells.
+   */
+  const staleAfterReload = async (before) => {
+    const { plan } = await deck.refreshTerminals();
+    return plan.filter((p) => before.has(p.t));
+  };
+
+  /** After a reload: one notification to refresh the terminals that are now out of date. */
+  const offerRefreshAfterReload = async () => {
+    const cfg = vscode.workspace.getConfiguration('agentDeck');
+    if (!cfg.get('offerRefreshAfterReload', true) || !restoredTerminals.size) return;
+    // Wait for Claude Code to publish this window's new port, so fresh terminals get the right one.
+    const cc = vscode.extensions.getExtension('anthropic.claude-code');
+    for (let i = 0; cc && !cc.isActive && i < 30; i++) await new Promise((r) => setTimeout(r, 500));
+    const stale = await staleAfterReload(restoredTerminals);
+    if (!stale.length) return;
+    const agents = stale.filter((p) => p.command).length;
+    const choice = await vscode.window.showInformationMessage(
+      `${stale.length} terminal${stale.length === 1 ? ' is' : 's are'} out of date after the reload (⚠).${agents ? ` ${agents} idle Claude session${agents === 1 ? '' : 's'} will be resumed.` : ''}`,
+      'Refresh',
+      "Don't Ask Again",
+    );
+    if (choice === 'Refresh') {
+      // Re-check: something may have started running while the notification was up.
+      const still = await staleAfterReload(restoredTerminals);
+      applyRefresh(still);
+      still.forEach((p) => restoredTerminals.delete(p.t));
+    } else if (choice === "Don't Ask Again") {
+      cfg.update('offerRefreshAfterReload', false, vscode.ConfigurationTarget.Global);
+    }
   };
 
   /** Jump to a terminal that needs you: its worktree becomes active and the terminal is focused. */
@@ -1997,15 +2048,7 @@ function activate(ctx) {
         'Refresh',
       );
       if (ok !== 'Refresh') return;
-      const active = vscode.window.activeTerminal;
-      let focus;
-      for (const p of plan) {
-        const fresh = deck.createTerminal(p.wt, { show: false, name: p.name, command: p.command, cwd: p.cwd, plain: true });
-        if (p.t === active) focus = fresh;
-        p.t.dispose();
-      }
-      focus?.show(true);
-      setTimeout(() => deck.poll(), 3000);
+      applyRefresh(plan);
     }),
     vscode.commands.registerCommand('agentDeck.goToFileInWorktree', () => goToFile()),
     vscode.commands.registerCommand('agentDeck.findInWorktree', () => {
@@ -2273,9 +2316,10 @@ function activate(ctx) {
       vscode.window.showInformationMessage(`Agent Deck: resumed ${n} Claude session${n === 1 ? '' : 's'} from before the restart.`);
       setTimeout(() => deck.poll(), 3000);
     }
+    await offerRefreshAfterReload();
   });
 
-  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown };
+  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh };
 }
 
 function deactivate() {}

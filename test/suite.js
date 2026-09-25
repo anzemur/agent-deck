@@ -466,5 +466,24 @@ exports.run = async function () {
     assert.strictEqual(tabColor, deck.colorOf(withTerm.path));
     console.log(`✓ ${ids.length} worktrees, ${new Set(ids).size} different colours, stable, tab colour = card colour`);
   }
+
+  // After a reload: terminals that existed before it are offered for refresh (idle/empty ones only),
+  // and refreshing swaps them for fresh ones in the same worktree.
+  {
+    const oldIdle = vscode.window.createTerminal({ name: 'restored-shell', cwd: a.path });
+    const oldBusy = vscode.window.createTerminal({ name: 'restored-busy', cwd: a.path });
+    oldBusy.sendText('sleep 60');
+    const before = new Set([oldIdle, oldBusy]);
+    let stale;
+    await until(async () => (stale = await ext.exports.staleAfterReload(before)).some((p) => p.t === oldIdle), 'restored shell settled', 20000);
+    assert.ok(!stale.some((p) => p.t === oldBusy), 'busy terminal not offered');
+    assert.ok(stale.every((p) => before.has(p.t)), 'only terminals from before the reload');
+    ext.exports.applyRefresh(stale);
+    await until(() => oldIdle.exitStatus !== undefined || !vscode.window.terminals.includes(oldIdle), 'old one closed');
+    assert.ok(vscode.window.terminals.includes(oldBusy));
+    assert.ok(vscode.window.terminals.some((t) => t !== oldIdle && deck.worktreeOf(t)?.path === a.path && t.creationOptions?.color));
+    console.log('✓ after-reload refresh: only idle terminals from before the reload are replaced (fresh, coloured); busy one kept');
+    oldBusy.dispose();
+  }
   console.log('ALL PASSED');
 };
