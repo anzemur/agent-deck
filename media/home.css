@@ -15,6 +15,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; padding: 0; }
 body {
   background: var(--bg);
@@ -170,3 +171,33 @@ kbd {
   .top .counts { display: none; }
   .hint { display: none; }
 }
+
+/* ---- attachments ---- */
+.composer { position: relative; }
+.attach { cursor: pointer; font: inherit; font-size: 0.9em; width: 30px; padding: 0; justify-content: center; }
+.attach:hover { color: var(--fg); }
+.atts { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 16px 12px; }
+.att {
+  display: inline-flex; align-items: center; gap: 8px; max-width: 240px;
+  height: 44px; padding: 4px 6px 4px 4px; border-radius: 9px;
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--fg) 10%, transparent);
+}
+.att img, .att-icon {
+  width: 36px; height: 36px; flex: none; border-radius: 6px; object-fit: cover;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--fg) 8%, transparent); color: var(--muted);
+}
+.att-name { font-size: 0.85em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.att-x {
+  border: 0; background: transparent; color: var(--muted); cursor: pointer; padding: 2px; border-radius: 4px;
+  display: inline-flex; flex: none;
+}
+.att-x:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 10%, transparent); }
+.att-x .ci { font-size: 14px; }
+.drop-hint {
+  position: absolute; inset: 0; z-index: 2; display: none; align-items: center; justify-content: center;
+  border-radius: inherit; border: 2px dashed color-mix(in srgb, var(--brand) 70%, transparent);
+  background: color-mix(in srgb, var(--bg) 70%, transparent); color: var(--fg); font-weight: 600; pointer-events: none;
+}
+.composer.dropping .drop-hint { display: flex; }

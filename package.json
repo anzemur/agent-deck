@@ -588,6 +588,11 @@
           "type": "boolean",
           "default": true,
           "description": "Open the Agent Deck home page (New Task + agents overview) when a window starts with no editors, instead of the editor's welcome page."
+        },
+        "agentDeck.closeOtherWorktreeTabs": {
+          "type": "boolean",
+          "default": false,
+          "description": "When you switch worktrees, close editor tabs that belong to other worktrees (never unsaved or pinned ones). Keeps the TypeScript server from loading several copies of a large repo."
         }
       }
     },

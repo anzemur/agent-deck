@@ -756,6 +756,64 @@ function runTeardown(repo, wtPath) {
   });
 }
 
+/**
+ * Writes pasted/dropped files into <worktree>/.agent-deck/attachments/ and keeps that folder out of
+ * git (via the repo's local info/exclude, never a tracked .gitignore). Returns worktree-relative paths.
+ * @param {{ name: string, data: string }[]} files base64 contents
+ */
+function saveAttachments(wtPath, files) {
+  if (!files.length) return [];
+  const dir = path.join(wtPath, '.agent-deck', 'attachments');
+  fs.mkdirSync(dir, { recursive: true });
+  try {
+    const exclude = String(require('child_process').execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-path', 'info/exclude'], { cwd: wtPath })).trim();
+    const has = fs.existsSync(exclude) && fs.readFileSync(exclude, 'utf8').split('\n').includes('.agent-deck/');
+    if (!has) {
+      fs.mkdirSync(path.dirname(exclude), { recursive: true });
+      fs.appendFileSync(exclude, '\n# Agent Deck task attachments\n.agent-deck/\n');
+    }
+  } catch {}
+  const out = [];
+  for (const f of files) {
+    const safe = path.basename(String(f.name || 'file')).replace(/[^\w.\-]+/g, '-').replace(/^-+/, '') || 'file';
+    let name = safe;
+    for (let i = 2; fs.existsSync(path.join(dir, name)); i++) name = safe.replace(/(\.[^.]*)?$/, `-${i}$1`);
+    fs.writeFileSync(path.join(dir, name), Buffer.from(String(f.data || ''), 'base64'));
+    out.push(`.agent-deck/attachments/${name}`);
+  }
+  return out;
+}
+
+/**
+ * The image on the macOS clipboard as base64 PNG (a screenshot taken with ⌘⌃⇧4, an image copied
+ * from a browser or Figma, …), or undefined when there is none. Webviews don't always receive
+ * pasted images, so the composer asks for it this way.
+ * @returns {Promise<string | undefined>}
+ */
+function readClipboardImage() {
+  if (process.platform !== 'darwin') return Promise.resolve(undefined);
+  const out = path.join(os.tmpdir(), `agent-deck-clip-${process.pid}-${Date.now()}.png`);
+  const script = [
+    `set f to open for access POSIX file ${JSON.stringify(out)} with write permission`,
+    'try',
+    'write (the clipboard as «class PNGf») to f',
+    'end try',
+    'close access f',
+  ];
+  return new Promise((resolve) => {
+    execFile('osascript', script.flatMap((l) => ['-e', l]), { timeout: 10000 }, () => {
+      try {
+        const buf = fs.readFileSync(out);
+        resolve(buf.length ? buf.toString('base64') : undefined);
+      } catch {
+        resolve(undefined);
+      } finally {
+        fs.rmSync(out, { force: true });
+      }
+    });
+  });
+}
+
 /** Single-quote for POSIX shells. */
 function sq(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
@@ -1672,7 +1730,7 @@ class HomePage {
     const csp = panel.webview.cspSource;
     const mark = fs.readFileSync(path.join(this.ctx.extensionPath, 'media', 'deck.svg'), 'utf8');
     panel.webview.html = `<!doctype html><html><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; font-src ${csp}; style-src ${csp} 'unsafe-inline'; img-src ${csp}; script-src 'nonce-${nonce}';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; font-src ${csp}; style-src ${csp} 'unsafe-inline'; img-src ${csp} blob: data:; script-src 'nonce-${nonce}';">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>@font-face { font-family: 'codicon'; src: url('${uri('codicon.ttf')}') format('truetype'); }</style>
 <link rel="stylesheet" href="${uri('home.css')}">
@@ -2066,6 +2124,11 @@ function activate(ctx) {
       deck.switchTo(m.path);
       return;
     }
+    if (m.type === 'task.clipboardImage') {
+      const data = await readClipboardImage();
+      home.send({ type: 'task.clipboard', data, name: `pasted-${Date.now().toString(36).slice(-4)}.png` });
+      return;
+    }
     const repo = taskRepo(m.repo);
     if (!repo) return;
     if (m.type === 'task.suggest') {
@@ -2076,7 +2139,8 @@ function activate(ctx) {
       const branch = String(m.branch ?? '').trim();
       const bad = branch && validateBranch(branch);
       if (!prompt || bad) return home.send({ type: 'task.error', message: bad || 'Describe the task first.' });
-      const made = await vscode.commands.executeCommand('agentDeck.newTask', { prompt, branch: branch || undefined, wtPath: repo.root });
+      const attachments = Array.isArray(m.attachments) ? m.attachments : [];
+      const made = await vscode.commands.executeCommand('agentDeck.newTask', { prompt, branch: branch || undefined, wtPath: repo.root, attachments });
       home.send(made ? { type: 'task.done' } : { type: 'task.error', message: "Couldn't create the worktree (see the error notification)." });
     }
   });
@@ -2087,6 +2151,34 @@ function activate(ctx) {
       },
     }),
   );
+
+  // ---- optional: close other worktrees' tabs when switching ----------------------------------------
+
+  /**
+   * Closes editor tabs that belong to worktrees other than `activePath`, except unsaved or pinned
+   * ones. Keeps the TypeScript server from holding several copies of a big monorepo in memory.
+   * @returns {Promise<number>} how many tabs were closed
+   */
+  const closeOtherWorktreeTabs = async (activePath) => {
+    const uriOf = (t) => {
+      const i = t.input;
+      if (i instanceof vscode.TabInputText) return i.uri;
+      if (i instanceof vscode.TabInputTextDiff) return i.modified;
+      return undefined;
+    };
+    const tabs = vscode.window.tabGroups.all.flatMap((g) => g.tabs).filter((t) => {
+      if (t.isDirty || t.isPinned) return false;
+      const uri = uriOf(t);
+      if (!uri || (uri.scheme !== 'file' && uri.scheme !== GIT_SCHEME)) return false;
+      const owner = deck.worktreeContaining(uri.fsPath || uri.path);
+      return owner && owner.path !== activePath;
+    });
+    if (tabs.length) await Promise.resolve(vscode.window.tabGroups.close(tabs, true)).catch(() => {});
+    return tabs.length;
+  };
+  deck.onActive((p) => {
+    if (p && vscode.workspace.getConfiguration('agentDeck').get('closeOtherWorktreeTabs', false)) closeOtherWorktreeTabs(p);
+  });
 
   /** Jump to a terminal that needs you: its worktree becomes active and the terminal is focused. */
   const goTo = (t) => {
@@ -2509,6 +2601,11 @@ function activate(ctx) {
       const wt = await createWorktree(repo, branch.trim());
       if (!wt) return;
 
+      // Attachments (screenshots, files) go into the worktree, and the task lists them for Claude.
+      const saved = saveAttachments(wt.path, arg?.attachments ?? []);
+      const fullTask = saved.length
+        ? `${task.trim()}\n\nAttached (look at these first): ${saved.map((p) => `@${p}`).join(' ')}`
+        : task.trim();
       deck.taskTitles.set(wt.path, task.trim().replace(/\s+/g, ' ').slice(0, 80));
       ctx.workspaceState.update('agentDeck.taskTitles', [...deck.taskTitles]);
 
@@ -2520,7 +2617,7 @@ function activate(ctx) {
       const setup = commands.length ? `{ ${commands.join(' && ')}; } ; ` : '';
       deck.setActive(wt.path);
       deck.createTerminal(wt, {
-        command: `${setup}${agent} ${sq(task.trim())}`,
+        command: `${setup}${agent} ${sq(fullTask)}`,
         plain: true,
         env: scriptEnv(repo),
       });
@@ -2691,7 +2788,7 @@ function activate(ctx) {
     await offerRefreshAfterReload();
   });
 
-  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh, goTo, focusByPid, home, openHome, transientNotice, alertItem, ensureNotifier: () => ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')) };
+  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh, goTo, focusByPid, home, openHome, closeOtherWorktreeTabs, readClipboardImage, transientNotice, alertItem, ensureNotifier: () => ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')) };
 }
 
 function deactivate() {}

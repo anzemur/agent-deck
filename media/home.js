@@ -9,6 +9,7 @@
     terminal: '\uea85', repo: '\uea62', 'git-pull-request': '\uea64', 'git-merge': '\ueafe',
     'git-pull-request-closed': '\uebda', bell: '\ueaa2', 'bell-dot': '\ueb9a', 'arrow-up': '\ueaa1',
     'diff': '\ueae1', 'play': '\ueb2c', 'debug-start': '\uead3', 'check': '\ueab2',
+    'file-media': '\ueaea', file: '\uea7b', close: '\uea76',
   };
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
   const ci = (n, cls = '') => `<i class="ci ${cls}" aria-hidden="true">${CI[n] ?? ''}</i>`;
@@ -32,7 +33,11 @@
     <h1>What should we build next?</h1>
     <div class="composer" id="composer">
       <textarea id="text" aria-label="Task" placeholder="Fix the flaky login redirect test — it fails when the session cookie expires mid-redirect.&#10;&#10;Keep the public API; add a regression test."></textarea>
+      <div class="atts" id="atts" hidden></div>
+      <div class="drop-hint" id="drop-hint">Drop to attach</div>
       <div class="bar">
+        <button class="chip attach" id="attach" title="Attach screenshots or files (or paste: ⌃V / ⌘V)" aria-label="Attach files">${ci('file-media')}</button>
+        <input type="file" id="file" multiple hidden>
         <label class="chip" id="repo-chip" hidden>${ci('repo')}<select id="repo" aria-label="Repository"></select></label>
         <label class="chip branch" title="Branch (suggested from the first line; type to set your own)">${ci('git-branch')}<input id="branch" spellcheck="false" placeholder="branch" aria-label="Branch"></label>
         <span class="chip" id="base-chip" title="New branch starts from this, freshly fetched"></span>
@@ -42,7 +47,7 @@
         </span>
       </div>
     </div>
-    <p class="hint"><kbd>⏎</kbd> to start · <kbd>⌥</kbd><kbd>⏎</kbd> new line</p>`;
+    <p class="hint"><kbd>⏎</kbd> to start · <kbd>⌥</kbd><kbd>⏎</kbd> new line · ⌃V / ⌘V paste a screenshot</p>`;
   const ta = /** @type {HTMLTextAreaElement} */ ($('#text'));
   const branch = /** @type {HTMLInputElement} */ ($('#branch'));
   const repoSel = /** @type {HTMLSelectElement} */ ($('#repo'));
@@ -74,6 +79,101 @@
   }
   const error = (msg) => ($('#error').textContent = msg);
 
+  // ---- attachments: paste, drop (hold ⇧ in the editor), or pick -----------------------------------
+
+  /** @type {{ id: number, name: string, type: string, size: number, data: string, url: string }[]} */
+  let attachments = [];
+  let nextId = 0;
+  const MAX_FILES = 10;
+  const MAX_BYTES = 15 * 1024 * 1024;
+
+  function renderAttachments() {
+    const box = $('#atts');
+    box.hidden = !attachments.length;
+    box.innerHTML = attachments
+      .map(
+        (a) => `<span class="att" title="${esc(a.name)} · ${Math.max(1, Math.round(a.size / 1024))} KB">
+          ${a.type.startsWith('image/') ? `<img src="${a.url}" alt="">` : `<span class="att-icon">${ci('file')}</span>`}
+          <span class="att-name">${esc(a.name)}</span>
+          <button class="att-x" data-id="${a.id}" title="Remove" aria-label="Remove ${esc(a.name)}">${ci('close')}</button>
+        </span>`,
+      )
+      .join('');
+  }
+
+  /** @param {FileList | File[]} files */
+  async function addFiles(files) {
+    let pasted = attachments.filter((a) => a.name.startsWith('pasted-')).length;
+    for (const f of Array.from(files)) {
+      if (attachments.length >= MAX_FILES) return error(`At most ${MAX_FILES} attachments.`);
+      if (f.size > MAX_BYTES) {
+        error(`${f.name} is over 15 MB.`);
+        continue;
+      }
+      // Pasted screenshots all arrive as "image.png"; give them distinct names.
+      const ext = (f.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+      const name = !f.name || /^image\.(png|jpe?g|gif|webp)$/i.test(f.name) ? `pasted-${++pasted}.${ext}` : f.name;
+      const data = await new Promise((res) => {
+        const r = new FileReader();
+        r.onload = () => res(String(r.result).split(',')[1] ?? '');
+        r.readAsDataURL(f);
+      });
+      attachments.push({ id: ++nextId, name, type: f.type || 'application/octet-stream', size: f.size, data, url: URL.createObjectURL(f) });
+    }
+    renderAttachments();
+  }
+
+  /** Ask the extension for the image on the system clipboard (works even when the page gets none). */
+  const pasteFromSystemClipboard = () => vscode.postMessage({ type: 'task.clipboardImage' });
+  ta.addEventListener('paste', (e) => {
+    const files = e.clipboardData?.files;
+    if (files && files.length) {
+      e.preventDefault();
+      addFiles(files);
+    } else if (!e.clipboardData?.getData('text/plain')) {
+      // Nothing usable reached the page (common for screenshots inside the editor): fetch it natively.
+      e.preventDefault();
+      pasteFromSystemClipboard();
+    }
+  });
+  // ⌃V pastes a screenshot too (on a Mac it does nothing in a text box by default).
+  ta.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'v' || e.key === 'V')) {
+      e.preventDefault();
+      pasteFromSystemClipboard();
+    }
+  });
+  const composerEl = $('#composer');
+  composerEl.addEventListener('dragover', (e) => {
+    if (!e.dataTransfer?.types.includes('Files')) return;
+    e.preventDefault();
+    composerEl.classList.add('dropping');
+  });
+  composerEl.addEventListener('dragleave', (e) => {
+    if (!composerEl.contains(/** @type {Node} */ (e.relatedTarget))) composerEl.classList.remove('dropping');
+  });
+  composerEl.addEventListener('drop', (e) => {
+    composerEl.classList.remove('dropping');
+    if (!e.dataTransfer?.files.length) return;
+    e.preventDefault();
+    addFiles(e.dataTransfer.files);
+  });
+  $('#attach').addEventListener('click', () => /** @type {HTMLInputElement} */ ($('#file')).click());
+  $('#file').addEventListener('change', (e) => {
+    const input = /** @type {HTMLInputElement} */ (e.target);
+    if (input.files) addFiles(input.files);
+    input.value = '';
+  });
+  $('#atts').addEventListener('click', (e) => {
+    const x = /** @type {HTMLElement} */ (e.target).closest('.att-x');
+    if (!x) return;
+    const id = Number(/** @type {HTMLElement} */ (x).dataset.id);
+    const gone = attachments.find((a) => a.id === id);
+    if (gone) URL.revokeObjectURL(gone.url);
+    attachments = attachments.filter((a) => a.id !== id);
+    renderAttachments();
+  });
+
   function submit() {
     if (busy) return;
     if (!draft.text.trim()) {
@@ -83,7 +183,13 @@
     }
     busy = true;
     syncChrome();
-    vscode.postMessage({ type: 'task.create', prompt: draft.text, branch: draft.branch, repo: draft.repo });
+    vscode.postMessage({
+      type: 'task.create',
+      prompt: draft.text,
+      branch: draft.branch,
+      repo: draft.repo,
+      attachments: attachments.map((a) => ({ name: a.name, data: a.data })),
+    });
   }
 
   ta.addEventListener('input', () => {
@@ -200,8 +306,19 @@
         syncChrome();
         save();
         break;
+      case 'task.clipboard':
+        if (m.data) {
+          const bytes = Uint8Array.from(atob(m.data), (c) => c.charCodeAt(0));
+          addFiles([new File([bytes], m.name, { type: 'image/png' })]);
+        } else {
+          error('No image on the clipboard.');
+        }
+        break;
       case 'task.done':
         busy = false;
+        attachments.forEach((a) => URL.revokeObjectURL(a.url));
+        attachments = [];
+        renderAttachments();
         draft = { text: '', branch: '', branchEdited: false, repo: draft.repo };
         ta.value = '';
         branch.value = '';

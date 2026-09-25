@@ -572,5 +572,40 @@ exports.run = async function () {
     home.send = origSend;
     console.log('✓ home page: opens as a tab, suggests "payment-retry-queue" from the first line, Start launches claude with the full multi-line task; bad branch refused');
   }
+
+  // Attachments: saved in the worktree (git-ignored locally) and handed to Claude with the task.
+  {
+    const fsx = require('fs');
+    const cpx = require('child_process');
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+    const made = await vscode.commands.executeCommand('agentDeck.newTask', {
+      prompt: 'Fix the header spacing',
+      wtPath: main.path,
+      attachments: [{ name: 'pasted-1.png', data: png }, { name: '../evil name.png', data: png }],
+    });
+    const dir = path.join(made, '.agent-deck/attachments');
+    assert.deepStrictEqual(fsx.readdirSync(dir).sort(), ['evil-name.png', 'pasted-1.png']);
+    assert.strictEqual(fsx.readFileSync(path.join(dir, 'pasted-1.png')).toString('base64'), png);
+    assert.strictEqual(cpx.execSync('git status --porcelain', { cwd: made }).toString().includes('.agent-deck'), false, 'attachments are git-ignored');
+    await until(() => cpx.spawnSync('pgrep', ['-f', '@.agent-deck/attachments/pasted-1.png']).stdout.toString().trim(), 'claude got the attachment paths', 15000);
+    console.log('✓ attachments: saved to .agent-deck/attachments/ (names made safe), ignored by git, passed to claude as @paths');
+  }
+
+  // Close other worktrees' tabs on switch: clean tabs of other worktrees close; unsaved ones stay.
+  {
+    const fsx = require('fs');
+    const [w1, w2] = deck.worktrees.filter((w) => !w.isMain);
+    const f1 = path.join(w1.path, 'keep-me.txt'), f2 = path.join(w2.path, 'close-me.txt'), f3 = path.join(w2.path, 'dirty.txt');
+    for (const f of [f1, f2, f3]) fsx.writeFileSync(f, 'x\n');
+    for (const f of [f1, f2, f3]) await vscode.window.showTextDocument(vscode.Uri.file(f), { preview: false });
+    const ed = await vscode.window.showTextDocument(vscode.Uri.file(f3), { preview: false });
+    await ed.edit((e) => e.insert(new vscode.Position(0, 0), 'unsaved '));
+    const n = await ext.exports.closeOtherWorktreeTabs(w1.path);
+    const open = vscode.window.tabGroups.all.flatMap((g) => g.tabs).map((t) => t.input?.uri?.fsPath).filter(Boolean);
+    assert.ok(n >= 1);
+    assert.ok(open.includes(f1) && open.includes(f3) && !open.includes(f2), JSON.stringify(open));
+    console.log(`✓ switching to ${w1.branch}: closed ${n} clean tab(s) from other worktrees, kept its own and the unsaved one`);
+    await vscode.commands.executeCommand('workbench.action.files.revert');
+  }
   console.log('ALL PASSED');
 };
