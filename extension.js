@@ -11,6 +11,8 @@ const ENV_KEY = 'AGENT_DECK_WORKTREE';
 const GIT_SCHEME = 'agentdeck-git';
 const AGENTS = new Set(['claude', 'codex', 'cursor-agent', 'aider', 'gemini', 'opencode', 'amp', 'goose']);
 const POLL_MS = 4000;
+/** Worktrees you're not looking at get their git status re-read at most this often. */
+const OTHER_WORKTREE_STATUS_MS = 16000;
 // An agent counts as working above this share of one core. Idle Claude sits at ~1–2%; while it
 // thinks or runs tools it keeps redrawing its spinner and is well above this.
 const WORKING_CPU = 0.04;
@@ -946,6 +948,8 @@ class Deck {
     this.busy = new Map();
     /** @type {Map<string, WtStatus>} */
     this.status = new Map();
+    /** @type {Map<string, number>} worktree path -> when its git status was last read */
+    this.statusAt = new Map();
     /** @type {Map<string, SessionInfo>} worktree path -> latest Claude session title / PR */
     this.sessions = new Map();
     /** @type {Map<string, string>} worktree path -> colour id, stable for the worktree's lifetime */
@@ -1067,28 +1071,45 @@ class Deck {
    * Re-reads the cheap-but-changing state: which worktree each terminal's processes are in,
    * git status per worktree. Fires onChange only when something differs.
    */
-  /** `light`: only re-scan terminal processes (used while the window is in the background). */
-  poll(silent = false, { light = false } = {}) {
+  /**
+   * `light`: only re-scan terminal processes (window in the background).
+   * `background`: the 4-second timer: git status for the active worktree every time, for the
+   * others only when they're 16 s stale, one at a time. Everything else (explicit polls after an
+   * action, refresh, tests) reads all worktrees.
+   */
+  poll(silent = false, { light = false, background = false } = {}) {
     // One poll at a time; a request during a poll gets a fresh one right after it, so callers
     // always see state read after they asked.
     if (this.pollRun) {
       this.pollNext ??= this.pollRun.then(() => {
         this.pollNext = undefined;
-        return this.poll(silent, { light });
+        return this.poll(silent, { light, background });
       });
       return this.pollNext;
     }
-    this.pollRun = this._poll(silent, light).finally(() => (this.pollRun = undefined));
+    this.pollRun = this._poll(silent, light, background).finally(() => (this.pollRun = undefined));
     return this.pollRun;
   }
 
-  async _poll(silent, light) {
+  /** git status for the worktrees that are due, sequentially (not all at once). */
+  async readStatuses(background) {
+    const now = Date.now();
+    const due = this.worktrees.filter((w) => !background || w.path === this.active || now - (this.statusAt.get(w.path) ?? 0) >= OTHER_WORKTREE_STATUS_MS);
+    const out = [];
+    for (const w of due) {
+      out.push(/** @type {const} */ ([w.path, await readStatus(w.path)]));
+      this.statusAt.set(w.path, Date.now());
+    }
+    return out;
+  }
+
+  async _poll(silent, light, background) {
     this.polling = true;
     try {
       const terminals = [...vscode.window.terminals];
       const [procs, statuses] = await Promise.all([
         scanTerminalProcesses(terminals, (p) => this.worktreeContaining(p)).catch(() => new Map()),
-        light ? undefined : Promise.all(this.worktrees.map(async (w) => /** @type {const} */ ([w.path, await readStatus(w.path)]))),
+        light ? undefined : this.readStatuses(background),
       ]);
       this.procs = procs;
       const ours = new Set([...procs.values()].map((p) => p.sessionId).filter(Boolean));
@@ -1097,7 +1118,14 @@ class Deck {
       this.recordAgents();
       this.trackAttention();
       if (statuses) {
-        this.status = new Map(statuses.filter(([, s]) => s).map(([p, s]) => [p, /** @type {WtStatus} */ (s)]));
+        // Merge: worktrees that weren't due this round keep their last status.
+        const live = new Set(this.worktrees.map((w) => w.path));
+        const next = new Map([...this.status].filter(([p]) => live.has(p)));
+        for (const [p, st] of statuses) {
+          if (st) next.set(p, /** @type {WtStatus} */ (st));
+          else next.delete(p);
+        }
+        this.status = next;
         this.sessions = new Map();
         for (const w of this.worktrees) {
           const info = readSessionInfo(w, (p) => this.worktreeContaining(p));
@@ -1923,29 +1951,63 @@ class FilesTree {
     this.deck = deck;
     this._onDidChange = new vscode.EventEmitter();
     this.onDidChangeTreeData = this._onDidChange.event;
-    this.watcher = undefined;
+    /**
+     * One non-recursive watcher per visible folder (the root and the folders you've expanded).
+     * Watching the whole worktree recursively meant watching node_modules too: `bun install`
+     * writes ~200k files, macOS drops the events and the watcher re-scans everything, repeatedly.
+     * @type {Map<string, vscode.FileSystemWatcher>}
+     */
+    this.watchers = new Map();
     this.root = undefined;
     /** @type {Map<string, vscode.FileType>} */
     this.types = new Map();
+    this.refreshTimer = undefined;
     this.setRoot(deck.active);
     deck.onActive((p) => this.setRoot(p));
+  }
+
+  /** Folders never watched (and never worth watching): huge, generated, or git internals. */
+  static unwatched(name) {
+    return /^(node_modules|\.git|\.next|\.turbo|dist|build|out|\.cache|coverage|\.vercel)$/.test(name);
+  }
+
+  get watcher() {
+    return this.watchers.size ? [...this.watchers.values()][0] : undefined; // kept for dispose on deactivate
+  }
+
+  /** Start watching one folder's direct children (not its subfolders). */
+  watchDir(fsPath) {
+    if (this.watchers.has(fsPath) || FilesTree.unwatched(path.basename(fsPath))) return;
+    const w = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(vscode.Uri.file(fsPath), '*'), false, true, false);
+    const kick = () => {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = setTimeout(() => this.refresh(), 250);
+    };
+    w.onDidCreate(kick);
+    w.onDidDelete(kick);
+    this.watchers.set(fsPath, w);
+  }
+
+  /** Stop watching a folder and everything under it (it was collapsed). */
+  unwatchDir(fsPath) {
+    for (const [p, w] of this.watchers) {
+      if (p !== this.root && isInside(p, fsPath)) {
+        w.dispose();
+        this.watchers.delete(p);
+      }
+    }
+  }
+
+  disposeWatchers() {
+    for (const w of this.watchers.values()) w.dispose();
+    this.watchers.clear();
   }
 
   setRoot(p) {
     if (p === this.root) return;
     this.root = p;
-    this.watcher?.dispose();
-    this.watcher = undefined;
-    if (p) {
-      let timer;
-      const kick = () => {
-        clearTimeout(timer);
-        timer = setTimeout(() => this.refresh(), 250);
-      };
-      this.watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(vscode.Uri.file(p), '**/*'), false, true, false);
-      this.watcher.onDidCreate(kick);
-      this.watcher.onDidDelete(kick);
-    }
+    this.disposeWatchers();
+    if (p) this.watchDir(p);
     this.refresh();
   }
 
@@ -2512,7 +2574,7 @@ function activate(ctx) {
   // without telling us.
   // In the background only terminal processes are re-scanned (cheap), so "needs you" alerts still
   // arrive while you're in another app.
-  const timer = setInterval(() => deck.poll(false, { light: !vscode.window.state.focused }), POLL_MS);
+  const timer = setInterval(() => deck.poll(false, { light: !vscode.window.state.focused, background: true }), POLL_MS);
 
   // When polling discovers the active terminal moved worktree (e.g. `claude -w` just started),
   // follow it.
@@ -2599,7 +2661,9 @@ function activate(ctx) {
     status,
     { dispose: () => clearInterval(timer) },
     { dispose: () => deck.gitWatchers.forEach((w) => w.dispose()) },
-    { dispose: () => files.watcher?.dispose() },
+    { dispose: () => files.disposeWatchers() },
+    filesView.onDidExpandElement((e) => files.watchDir(e.element.fsPath)),
+    filesView.onDidCollapseElement((e) => files.unwatchDir(e.element.fsPath)),
     vscode.workspace.registerTextDocumentContentProvider(GIT_SCHEME, new GitContent()),
 
     vscode.window.onDidChangeActiveTerminal(syncFromTerminal),
@@ -3054,7 +3118,7 @@ function activate(ctx) {
     await offerRefreshAfterReload();
   });
 
-  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh, goTo, focusByPid, home, openHome, closeOtherWorktreeTabs, readClipboardImage, appOfProcess, adoptExternal, pendingMoves, transientNotice, alertItem, ensureNotifier: () => ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')) };
+  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh, goTo, focusByPid, files, home, openHome, closeOtherWorktreeTabs, readClipboardImage, appOfProcess, adoptExternal, pendingMoves, transientNotice, alertItem, ensureNotifier: () => ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')) };
 }
 
 function deactivate() {}

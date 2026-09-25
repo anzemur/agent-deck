@@ -701,5 +701,35 @@ exports.run = async function () {
     assert.ok(deck.sessions.get(b.path).prs.some((p) => p.number === 777) && !deck.sessions.get(main.path)?.prs.some((p) => p.number === 777));
     console.log('✓ a claude -w session whose history moved to main after /exit still names its worktree, not main');
   }
+
+  // Performance: the Files view watches only visible folders, never node_modules & co; the
+  // background poll reads git status for the active worktree every time, others only when stale.
+  {
+    const fsx = require('fs');
+    const { files } = ext.exports;
+    deck.setActive(a.path);
+    await until(() => files.root === a.path, 'files root');
+    assert.deepStrictEqual([...files.watchers.keys()], [a.path], 'only the root is watched at first');
+    fsx.mkdirSync(path.join(a.path, 'node_modules/pkg'), { recursive: true });
+    fsx.mkdirSync(path.join(a.path, 'src/deep'), { recursive: true });
+    files.watchDir(path.join(a.path, 'node_modules'));
+    files.watchDir(path.join(a.path, 'src'));
+    assert.ok(!files.watchers.has(path.join(a.path, 'node_modules')), 'node_modules never watched');
+    assert.ok(files.watchers.has(path.join(a.path, 'src')));
+    files.unwatchDir(path.join(a.path, 'src'));
+    assert.deepStrictEqual([...files.watchers.keys()], [a.path]);
+    console.log('✓ Files view: watches the root + expanded folders only, never node_modules; collapsing stops watching');
+
+    const other = deck.worktrees.find((w) => w.path !== a.path);
+    await deck.poll(); // everything fresh
+    const before = deck.statusAt.get(other.path);
+    const activeBefore = deck.statusAt.get(a.path);
+    await sleep(30);
+    await deck.poll(false, { background: true });
+    assert.strictEqual(deck.statusAt.get(other.path), before, 'other worktree not re-read within 16 s');
+    assert.ok(deck.statusAt.get(a.path) > activeBefore, 'active worktree re-read every time');
+    assert.ok(deck.status.has(other.path), 'other worktree keeps its last status');
+    console.log('✓ background poll: active worktree read every tick, others skipped while fresh (kept, not dropped)');
+  }
   console.log('ALL PASSED');
 };
