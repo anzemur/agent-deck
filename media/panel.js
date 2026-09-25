@@ -13,7 +13,7 @@
     'git-pull-request': '\uea64', 'git-pull-request-draft': '\uebdb', 'git-merge': '\ueafe',
     'git-pull-request-closed': '\uebda', 'play-circle': '\ueba6', check: '\ueab2',
     'link-external': '\ueb14', folder: '\uea83', 'empty-window': '\ueae4',
-    'arrow-up': '\ueaa1', 'arrow-down': '\uea9a', bell: '\ueaa2', 'bell-dot': '\ueb9a',
+    'arrow-up': '\ueaa1', 'arrow-down': '\uea9a', bell: '\ueaa2', 'bell-dot': '\ueb9a', trash: '\uea81',
   };
 
   /** @type {any} */
@@ -109,6 +109,7 @@
       ${stateIcon}
       <span class="text"><span class="title">${esc(w.title)}</span><span class="meta">${meta}</span></span>
       <span class="actions">${act('terminal', 'New Terminal', 'agentDeck.newTerminal', { wtPath: w.path })}${act('empty-window', 'Open in New Window', 'agentDeck.openInNewWindow', { wtPath: w.path })}</span>
+      ${w.cleanable ? `<span class="cleanup">${act('trash', 'Clean up: delete this finished worktree', 'agentDeck.removeWorktree', { wtPath: w.path })}</span>` : ''}
       <span class="badge">${esc(w.badge)}</span>
     </div>`;
     const body = open ? `<div class="body">${w.sections.map((s) => renderSection(w, s)).join('')}</div>` : '';

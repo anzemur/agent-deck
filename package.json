@@ -210,6 +210,12 @@
         "title": "Go to File in Active Worktree\u2026",
         "icon": "$(go-to-file)",
         "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.cleanUpWorktrees",
+        "title": "Clean Up Finished Worktrees\u2026",
+        "icon": "$(trash)",
+        "category": "Agent Deck"
       }
     ],
     "menus": {
@@ -243,6 +249,11 @@
           "command": "agentDeck.refreshTerminals",
           "when": "view == agentDeck.worktrees",
           "group": "1_more@1"
+        },
+        {
+          "command": "agentDeck.cleanUpWorktrees",
+          "when": "view == agentDeck.worktrees",
+          "group": "1_more@2"
         }
       ],
       "commandPalette": [

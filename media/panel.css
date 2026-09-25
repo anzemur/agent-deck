@@ -116,3 +116,8 @@ body.vscode-light .seti, body.vscode-high-contrast-light .seti { color: var(--fc
 .attn { color: var(--vscode-charts-orange, #d18616) !important; }
 .wt .meta .attn { font-weight: 500; }
 .wt.needs .title { font-weight: 600; }
+
+/* ---- finished worktree (PR merged/closed, nothing left in it) ---- */
+.wt .meta .done { color: var(--vscode-charts-purple, #a371f7); }
+.wt .cleanup { flex: none; margin-top: -2px; }
+.wt .cleanup .act { color: var(--vscode-charts-purple, #a371f7); }

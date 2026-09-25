@@ -47,7 +47,7 @@ const COLORS = [
 /** @typedef {{ kind: 'waiting' | 'done', since: number, reason: string | undefined }} Attention  agent needs you: blocked on a question/approval, or finished unseen work */
 /** @typedef {{ sessionId: string, wtPath: string, name: string }} AgentRecord  a Claude session to bring back after a restart */
 /** @typedef {{ title: string | undefined, prs: { number: number, url: string }[] }} SessionInfo */
-/** @typedef {{ number: number, url: string, title: string | undefined, state: string | undefined, isDraft: boolean, own: boolean }} PullRequest  own = this worktree's branch is its head */
+/** @typedef {{ number: number, url: string, title: string | undefined, state: string | undefined, isDraft: boolean, own: boolean, headRefOid?: string }} PullRequest  own = this worktree's branch is its head */
 
 /** @typedef {'staged' | 'unstaged'} Group */
 
@@ -413,7 +413,7 @@ async function ghJson(cwd, args) {
   return data;
 }
 
-const PR_FIELDS = 'number,title,url,state,isDraft,headRefName';
+const PR_FIELDS = 'number,title,url,state,isDraft,headRefName,headRefOid';
 
 /**
  * PRs for a worktree: the ones whose head is its branch, plus the ones its Claude session linked.
@@ -426,7 +426,8 @@ async function readPrs(wt, session) {
   const out = new Map();
   if (wt.branch) {
     const own = await ghJson(wt.repo.root, ['pr', 'list', '--head', wt.branch, '--state', 'all', '--json', PR_FIELDS, '--limit', '5']);
-    for (const p of own ?? []) out.set(p.number, { ...p, own: true });
+    // Newest first: after a closed PR someone may have opened a fresh one for the same branch.
+    for (const p of (own ?? []).sort((x, y) => y.number - x.number)) out.set(p.number, { ...p, own: true });
   }
   for (const link of session?.prs ?? []) {
     if (out.has(link.number)) continue;
@@ -907,6 +908,25 @@ class Deck {
     return { plan, skipped };
   }
 
+  // ------------------------------------------------------------ clean up
+
+  /**
+   * A worktree you're done with and can delete without losing anything: its branch's latest PR is
+   * merged or closed, the worktree sits exactly on the commit that PR was made from, there are no
+   * uncommitted changes, and nothing is running in it.
+   * @returns {{ pr: PullRequest } | undefined}
+   */
+  cleanable(wt) {
+    if (wt.isMain || wt.locked) return undefined;
+    const pr = (this.prs.get(wt.path) ?? []).find((p) => p.own);
+    if (!pr || (pr.state !== 'MERGED' && pr.state !== 'CLOSED')) return undefined;
+    if (!pr.headRefOid || pr.headRefOid !== wt.head) return undefined; // local commits beyond the PR
+    const st = this.status.get(wt.path);
+    if (!st || st.changes.length) return undefined;
+    const busy = this.terminalsOf(wt.path).some((t) => this.isWorking(t) || this.isRunningCommand(t) || this.procs.get(t)?.status === 'waiting');
+    return busy ? undefined : { pr };
+  }
+
   // ------------------------------------------------------------ attention ("needs you")
 
   /** You looked at this terminal: whatever it finished so far is no longer news. */
@@ -1269,7 +1289,9 @@ function buildModel(deck, termId) {
 
     /** @type {{ icon?: string, text: string }[]} */
     const meta = [];
+    const done = deck.cleanable(wt);
     if (attention) meta.push({ icon: 'bell', text: attentionText(attention), cls: 'attn' });
+    if (done) meta.push({ icon: done.pr.state === 'MERGED' ? 'git-merge' : 'git-pull-request-closed', text: `${done.pr.state === 'MERGED' ? 'merged' : 'closed'} · clean up`, cls: 'done' });
     meta.push({ icon: 'git-branch', text: wtLabel(wt) });
     if (ownPr) meta.push({ icon: 'git-pull-request', text: `#${ownPr.number}` });
     if (st?.ahead || st?.behind) meta.push({ text: `${st.ahead ? `↑${st.ahead}` : ''}${st.behind ? ` ↓${st.behind}` : ''}`.trim() });
@@ -1349,6 +1371,7 @@ function buildModel(deck, termId) {
       // Badges: "●3" on the active worktree, plain change count on the others.
       badge: active ? `●${n || ''}` : n ? String(n) : '',
       meta, sections, tooltip,
+      cleanable: !!done,
       context: { webviewSection: 'worktree', wtPath: wt.path, isMain: wt.isMain, hasPr: prs.length > 0 },
     };
   });
@@ -1684,6 +1707,42 @@ function activate(ctx) {
     }
     await deck.refresh();
     return deck.findWorktree(target) ?? deck.worktrees.find((w) => w.branch === branch);
+  };
+
+  /**
+   * Teardown → close its terminals → `git worktree remove` → optionally the branch. Shared by the
+   * single delete and Clean Up. `allowForce`: ask to force when git refuses (dirty worktree).
+   * @returns {Promise<{ error?: string }>}
+   */
+  const deleteWorktree = async (wt, { deleteBranch = false, allowForce = false } = {}) => {
+    deck.terminalsOf(wt.path).forEach((t) => t.dispose());
+    const teardown = await runTeardown(wt.repo, wt.path);
+    if (teardown.error) vscode.window.showWarningMessage(`Agent Deck: teardown for ${wtLabel(wt)} failed (${teardown.error}). Deleting the worktree anyway.`);
+    const remove = (force) => git(wt.repo.root, ['worktree', 'remove', ...(force ? ['--force'] : []), wt.path]);
+    try {
+      await remove(false);
+    } catch (e) {
+      if (!allowForce) return { error: e.message };
+      const force = await vscode.window.showWarningMessage(
+        `git refused: ${e.message}`,
+        { modal: true, detail: 'Force delete discards uncommitted changes in this worktree.' },
+        'Force Delete',
+      );
+      if (!force) return { error: 'kept (not forced)' };
+      try {
+        await remove(true);
+      } catch (e2) {
+        return { error: e2.message };
+      }
+    }
+    if (deleteBranch && wt.branch) {
+      // -D: squash merges leave the branch "unmerged" to git even though its PR is in.
+      await git(wt.repo.root, ['branch', '-D', wt.branch]).catch(() => {});
+    }
+    deck.taskTitles.delete(wt.path);
+    if (deck.active === wt.path) deck.setActive(wt.repo.root);
+    await deck.refresh();
+    return {};
   };
 
   /** Jump to a terminal that needs you: its worktree becomes active and the terminal is focused. */
@@ -2065,49 +2124,61 @@ function activate(ctx) {
       if (!wt || wt.isMain) return;
       const terms = deck.terminalsOf(wt.path);
       const n = deck.status.get(wt.path)?.changes.length ?? 0;
-      const detail = [wt.path, n ? `${n} uncommitted change(s).` : '', terms.length ? `${terms.length} terminal(s) will be killed.` : '']
-        .filter(Boolean)
-        .join('\n\n');
-      const choice = await vscode.window.showWarningMessage(
-        `Delete worktree "${wtLabel(wt)}"?`,
-        { modal: true, detail },
-        'Delete Worktree',
-        ...(wt.branch ? ['Delete Worktree and Branch'] : []),
-      );
+      const done = deck.cleanable(wt);
+      const detail = [
+        wt.path,
+        done ? `PR #${done.pr.number} is ${done.pr.state.toLowerCase()} and this worktree has nothing that isn't in it.` : '',
+        n ? `${n} uncommitted change(s).` : '',
+        terms.length ? `${terms.length} terminal(s) will be closed.` : '',
+      ].filter(Boolean).join('\n\n');
+      // For finished work, deleting the branch too is the likely choice, so offer it first.
+      const both = 'Delete Worktree and Branch', only = 'Delete Worktree';
+      const buttons = wt.branch ? (done ? [both, only] : [only, both]) : [only];
+      const choice = await vscode.window.showWarningMessage(`Delete worktree "${wtTitle(wt, deck)}"?`, { modal: true, detail }, ...buttons);
       if (!choice) return;
-      terms.forEach((t) => t.dispose());
-      const teardown = await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: `Running teardown for ${wtLabel(wt)}…` },
-        () => runTeardown(wt.repo, wt.path),
-      );
-      if (teardown.error) vscode.window.showWarningMessage(`Agent Deck: teardown failed (${teardown.error}). Deleting the worktree anyway.`);
-      const runRemove = (force) => git(wt.repo.root, ['worktree', 'remove', ...(force ? ['--force'] : []), wt.path]);
-      try {
-        await runRemove(false);
-      } catch (e) {
-        const force = await vscode.window.showWarningMessage(
-          `git refused: ${e.message}`,
-          { modal: true, detail: 'Force delete discards uncommitted changes in this worktree.' },
-          'Force Delete',
-        );
-        if (!force) return;
-        try {
-          await runRemove(true);
-        } catch (e2) {
-          vscode.window.showErrorMessage(`Agent Deck: ${e2.message}`);
-          return;
-        }
+      const res = await deleteWorktree(wt, { deleteBranch: choice === both, allowForce: true });
+      if (res.error) vscode.window.showErrorMessage(`Agent Deck: ${res.error}`);
+    }),
+
+    vscode.commands.registerCommand('agentDeck.cleanUpWorktrees', async (arg) => {
+      await deck.refresh();
+      await deck.refreshPrs();
+      const candidates = deck.worktrees.map((w) => ({ w, d: deck.cleanable(w) })).filter((x) => x.d);
+      if (!candidates.length) {
+        vscode.window.showInformationMessage('Agent Deck: nothing to clean up. No worktree has a merged or closed PR with nothing left in it.');
+        return [];
       }
-      if (choice === 'Delete Worktree and Branch' && wt.branch) {
-        try {
-          await git(wt.repo.root, ['branch', '-d', wt.branch]);
-        } catch {
-          const force = await vscode.window.showWarningMessage(`Branch ${wt.branch} is not fully merged.`, { modal: true }, 'Delete Anyway');
-          if (force) await git(wt.repo.root, ['branch', '-D', wt.branch]).catch((e3) => vscode.window.showErrorMessage(e3.message));
-        }
+      let picked = candidates;
+      if (!arg?.all) {
+        const items = candidates.map(({ w, d }) => ({
+          label: `$(${d?.pr.state === 'MERGED' ? 'git-merge' : 'git-pull-request-closed'}) ${wtTitle(w, deck)}`,
+          description: `${wtLabel(w)} · #${d?.pr.number} ${d?.pr.state === 'MERGED' ? 'merged' : 'closed'}`,
+          detail: w.path,
+          picked: true,
+          w,
+        }));
+        const sel = await vscode.window.showQuickPick(items, {
+          canPickMany: true,
+          title: 'Clean up worktrees',
+          placeHolder: 'Finished worktrees: their PR is merged/closed and they have no changes beyond it. Untick any to keep.',
+        });
+        if (!sel?.length) return [];
+        picked = candidates.filter((c) => sel.some((s) => s.w === c.w));
       }
-      if (deck.active === wt.path) deck.setActive(wt.repo.root);
-      deck.refresh();
+      const results = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Cleaning up worktrees' }, async (p) => {
+        const out = [];
+        for (const { w, d } of picked) {
+          p.report({ message: wtLabel(w) });
+          // Merged: the branch is in staging, drop it. Closed: keep the branch, only free the folder.
+          out.push({ w, ...(await deleteWorktree(w, { deleteBranch: d?.pr.state === 'MERGED', allowForce: false })) });
+        }
+        return out;
+      });
+      const failed = results.filter((r) => r.error);
+      const ok = results.length - failed.length;
+      const msg = `Agent Deck: removed ${ok} worktree${ok === 1 ? '' : 's'}.${failed.length ? ` Couldn't remove: ${failed.map((f) => `${wtLabel(f.w)} (${f.error})`).join('; ')}` : ''}`;
+      (failed.length ? vscode.window.showWarningMessage : vscode.window.showInformationMessage)(msg);
+      return results.map((r) => ({ path: r.w.path, error: r.error }));
     }),
 
     vscode.commands.registerCommand('agentDeck.addRepository', async () => {
