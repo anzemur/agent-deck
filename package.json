@@ -240,6 +240,11 @@
         "command": "agentDeck.goToTerminal",
         "title": "Jump to Agent",
         "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.openExternal",
+        "title": "Show Agent in Its App",
+        "category": "Agent Deck"
       }
     ],
     "menus": {
@@ -350,6 +355,10 @@
         },
         {
           "command": "agentDeck.goToTerminal",
+          "when": "false"
+        },
+        {
+          "command": "agentDeck.openExternal",
           "when": "false"
         }
       ],

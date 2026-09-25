@@ -607,5 +607,37 @@ exports.run = async function () {
     console.log(`✓ switching to ${w1.branch}: closed ${n} clean tab(s) from other worktrees, kept its own and the unsaved one`);
     await vscode.commands.executeCommand('workbench.action.files.revert');
   }
+
+  // Claude sessions in other apps (here: a fake one "in Superset") show on their worktree's card.
+  {
+    const fsx = require('fs');
+    const cpx = require('child_process');
+    const target = deck.worktrees.find((w) => !w.isMain && !deck.terminalsOf(w.path).length) ?? deck.worktrees.find((w) => !w.isMain);
+    const child = cpx.spawn(`${process.env.AGENT_DECK_TEST_BIN}/claude`, ['120'], { cwd: target.path, env: { ...process.env, SUPERSET_TERMINAL_ID: 't-1', SUPERSET_WORKSPACE_ID: 'w-1' }, detached: true, stdio: 'ignore' });
+    const pidFile = path.join(process.env.AGENT_DECK_CLAUDE_SESSIONS, `${child.pid}.json`);
+    const write = (status, extra = {}) => fsx.writeFileSync(pidFile, JSON.stringify({ pid: child.pid, sessionId: 'ext-1', cwd: target.path, status, statusUpdatedAt: Date.now(), ...extra }));
+    write('busy');
+    await deck.poll();
+    let m = wtModel(target);
+    const row = m.sections.find((s) => s.kind === 'terminals').terminals.find((x) => x.external);
+    assert.ok(row, 'external row on the card');
+    assert.strictEqual(row.name, 'Superset');
+    assert.strictEqual(row.external.bundle, 'com.superset.desktop');
+    assert.strictEqual(m.state, 'working');
+    console.log(`✓ Claude running in Superset shows under "${path.basename(target.path)}": "${row.name} · ${row.sub}", card state working`);
+    await sleep(20);
+    write('waiting', { waitingFor: 'permission prompt' });
+    await deck.poll();
+    m = wtModel(target);
+    assert.strictEqual(m.state, 'attention');
+    assert.match(m.meta[0].text, /^needs approval/);
+    assert.ok(!deck.cleanable(target), 'never offered for cleanup while an agent runs there');
+    console.log(`✓ …and when it waits for approval the card says "${m.meta[0].text}"`);
+    process.kill(child.pid);
+    await sleep(300);
+    await deck.poll();
+    assert.ok(!wtModel(target).sections.find((s) => s.kind === 'terminals').terminals.some((x) => x.external), 'gone when the session ends');
+    console.log('✓ …and disappears when that session ends');
+  }
   console.log('ALL PASSED');
 };

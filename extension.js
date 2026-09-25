@@ -254,6 +254,75 @@ function readClaudePidFile(pid) {
   }
 }
 
+/** @typedef {{ pid: number, sessionId: string, cwd: string, wtPath: string, status: string | undefined, waitingFor: string | undefined, statusSince: number | undefined, app: string, bundle: string | undefined }} ExternalAgent  a Claude session running outside this editor window (Superset, iTerm, …) */
+
+/** @type {Map<number, { app: string, bundle: string | undefined }>} */
+const appCache = new Map();
+
+/**
+ * Which app a process runs in, from its environment (macOS lets you read your own processes'):
+ * Superset marks its terminals, most terminals set TERM_PROGRAM, apps launched from Finder set
+ * __CFBundleIdentifier.
+ */
+function appOfProcess(pid) {
+  const hit = appCache.get(pid);
+  if (hit) return hit;
+  let env = '';
+  try {
+    env = String(require('child_process').execFileSync('ps', ['eww', '-o', 'command=', '-p', String(pid)], { timeout: 3000 }));
+  } catch {}
+  const get = (k) => env.match(new RegExp(`(?:^|\\s)${k}=(\\S+)`))?.[1];
+  const byBundle = {
+    'com.superset.desktop': 'Superset', 'com.googlecode.iterm2': 'iTerm', 'com.apple.Terminal': 'Terminal',
+    'dev.warp.Warp-Stable': 'Warp', 'com.mitchellh.ghostty': 'Ghostty', 'com.todesktop.230313mzl4w4u92': 'Cursor',
+    'com.microsoft.VSCode': 'VS Code', 'net.kovidgoyal.kitty': 'kitty', 'io.alacritty': 'Alacritty',
+  };
+  const byTerm = {
+    'iTerm.app': ['iTerm', 'com.googlecode.iterm2'], Apple_Terminal: ['Terminal', 'com.apple.Terminal'],
+    WarpTerminal: ['Warp', 'dev.warp.Warp-Stable'], ghostty: ['Ghostty', 'com.mitchellh.ghostty'],
+    vscode: ['another editor window', undefined], tmux: ['tmux', undefined],
+  };
+  let out;
+  if (get('SUPERSET_TERMINAL_ID') || get('SUPERSET_WORKSPACE_ID')) out = { app: 'Superset', bundle: 'com.superset.desktop' };
+  else if (get('__CFBundleIdentifier') && byBundle[get('__CFBundleIdentifier')]) out = { app: byBundle[get('__CFBundleIdentifier')], bundle: get('__CFBundleIdentifier') };
+  else if (byTerm[get('TERM_PROGRAM') ?? '']) out = { app: byTerm[get('TERM_PROGRAM')][0], bundle: byTerm[get('TERM_PROGRAM')][1] };
+  else out = { app: 'another app', bundle: undefined };
+  appCache.set(pid, out);
+  return out;
+}
+
+/**
+ * Claude sessions alive right now whose folder is one of our worktrees but which don't run in
+ * one of this window's terminals (`ours` = their session ids).
+ * @param {(p: string) => Worktree | undefined} locate
+ * @param {Set<string>} ours
+ * @returns {ExternalAgent[]}
+ */
+function externalClaudeSessions(locate, ours) {
+  const out = [];
+  let names = [];
+  try {
+    names = fs.readdirSync(CLAUDE_SESSIONS);
+  } catch {}
+  for (const name of names) {
+    const m = name.match(/^(\d+)\.json$/);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    try {
+      process.kill(pid, 0);
+    } catch {
+      continue;
+    }
+    const info = readClaudePidFile(pid);
+    if (!info?.sessionId || !info.cwd || ours.has(info.sessionId) || pid === process.ppid) continue;
+    const wt = locate(info.cwd);
+    if (!wt) continue;
+    const { app, bundle } = appOfProcess(pid);
+    out.push({ pid, sessionId: info.sessionId, cwd: info.cwd, wtPath: wt.path, status: info.status, waitingFor: info.waitingFor, statusSince: info.statusUpdatedAt, app, bundle });
+  }
+  return out;
+}
+
 /** Session ids of Claude processes alive right now, in any app. */
 function liveClaudeSessions() {
   const live = new Set();
@@ -864,6 +933,10 @@ class Deck {
     this.polling = false;
     this.lastPollSig = '';
     this.recordReady = false;
+    /** @type {ExternalAgent[]} Claude sessions in our worktrees running in other apps */
+    this.externals = [];
+    /** @type {Set<string>} external sessions that did work since you last looked (by session id) */
+    this.externalWorked = new Set();
     /** @type {Map<vscode.Terminal, number>} when you last looked at each terminal */
     this.seenAt = new Map();
     /** @type {Set<vscode.Terminal>} agents that did work since you last looked */
@@ -986,6 +1059,9 @@ class Deck {
         light ? undefined : Promise.all(this.worktrees.map(async (w) => /** @type {const} */ ([w.path, await readStatus(w.path)]))),
       ]);
       this.procs = procs;
+      const ours = new Set([...procs.values()].map((p) => p.sessionId).filter(Boolean));
+      this.externals = externalClaudeSessions((p) => this.worktreeContaining(p), /** @type {Set<string>} */ (ours));
+      for (const e of this.externals) if (e.status === 'busy') this.externalWorked.add(e.sessionId);
       this.recordAgents();
       this.trackAttention();
       if (statuses) {
@@ -998,6 +1074,7 @@ class Deck {
         this.refreshPrs();
       }
       const sig = JSON.stringify([
+        this.externals.map((e) => [e.sessionId, e.status, e.statusSince, e.wtPath]),
         [...procs].map(([t, i]) => [this.names.get(t) ?? t.name, i]),
         [...this.status],
         [...this.sessions],
@@ -1114,7 +1191,9 @@ class Deck {
     if (!pr.headRefOid || pr.headRefOid !== wt.head) return undefined; // local commits beyond the PR
     const st = this.status.get(wt.path);
     if (!st || st.changes.length) return undefined;
-    const busy = this.terminalsOf(wt.path).some((t) => this.isWorking(t) || this.isRunningCommand(t) || this.procs.get(t)?.status === 'waiting');
+    const busy =
+      this.externalsOf(wt.path).length > 0 ||
+      this.terminalsOf(wt.path).some((t) => this.isWorking(t) || this.isRunningCommand(t) || this.procs.get(t)?.status === 'waiting');
     return busy ? undefined : { pr };
   }
 
@@ -1136,6 +1215,24 @@ class Deck {
     if (p.status === 'waiting') return { kind: 'waiting', since, reason: p.waitingFor };
     if (p.status === 'idle' && this.workedSinceSeen.has(t)) return { kind: 'done', since, reason: undefined };
     return undefined;
+  }
+
+  /** @returns {ExternalAgent[]} */
+  externalsOf(wtPath) {
+    return this.externals.filter((e) => e.wtPath === wtPath);
+  }
+
+  /** @param {ExternalAgent} e @returns {Attention | undefined} */
+  attentionOfExternal(e) {
+    const since = e.statusSince ?? Date.now();
+    if (e.status === 'waiting') return { kind: 'waiting', since, reason: e.waitingFor };
+    if (e.status === 'idle' && this.externalWorked.has(e.sessionId)) return { kind: 'done', since, reason: undefined };
+    return undefined;
+  }
+
+  /** You looked at an external session (opened its app from the panel). */
+  markExternalSeen(sessionId) {
+    if (this.externalWorked.delete(sessionId)) this._onChange.fire();
   }
 
   /** Terminals whose agent needs you, most urgent (blocked) first, then oldest first. */
@@ -1465,11 +1562,11 @@ function buildModel(deck, termId) {
   const worktrees = deck.worktrees.map((wt) => {
     const terms = deck.terminalsOf(wt.path);
     const st = deck.status.get(wt.path);
-    const working = terms.some((t) => deck.isWorking(t));
-    const idle = !working && terms.some((t) => deck.isIdleAgent(t));
-    // Most urgent thing any of its agents needs from you.
-    const attention = terms
-      .map((t) => deck.attentionOf(t))
+    const ext = deck.externalsOf(wt.path);
+    const working = terms.some((t) => deck.isWorking(t)) || ext.some((e) => e.status === 'busy');
+    const idle = !working && (terms.some((t) => deck.isIdleAgent(t)) || ext.length > 0);
+    // Most urgent thing any of its agents (here or in another app) needs from you.
+    const attention = [...terms.map((t) => deck.attentionOf(t)), ...ext.map((e) => deck.attentionOfExternal(e))]
       .filter(Boolean)
       .sort((x, y) => Number(y?.kind === 'waiting') - Number(x?.kind === 'waiting') || (x?.since ?? 0) - (y?.since ?? 0))[0];
     const prs = deck.prs.get(wt.path) ?? [];
@@ -1526,7 +1623,22 @@ function buildModel(deck, termId) {
             ? `${proc.agent} · ${att ? attentionText(att) : proc.working ? 'working' : 'idle'}`
             : cmd ? lastCommand.get(t) ?? '' : '',
         };
-      }),
+      }).concat(
+        // Sessions in other apps: shown, clickable (brings that app forward), not ours to manage.
+        ext.map((e) => {
+          const att = deck.attentionOfExternal(e);
+          const busy = e.status === 'busy';
+          return {
+            id: `ext:${e.sessionId}`,
+            external: { bundle: e.bundle, sessionId: e.sessionId, app: e.app },
+            name: e.app,
+            icon: att ? 'bell-dot' : busy ? 'loading' : 'sparkle',
+            spin: !att && busy,
+            attention: !!att,
+            sub: `claude · ${att ? attentionText(att) : busy ? 'working' : 'idle'}`,
+          };
+        }),
+      ),
     });
     sections.push({
       kind: 'prs',
@@ -1571,11 +1683,12 @@ function buildModel(deck, termId) {
     // Stable within each group (and within each repo), so rows only move when their state changes.
     const rank = (w) => {
       const terms = deck.terminalsOf(w.path);
-      const atts = terms.map((t) => deck.attentionOf(t)).filter(Boolean);
+      const ext = deck.externalsOf(w.path);
+      const atts = [...terms.map((t) => deck.attentionOf(t)), ...ext.map((e) => deck.attentionOfExternal(e))].filter(Boolean);
       if (atts.some((a) => a?.kind === 'waiting')) return [0, Math.min(...atts.map((a) => a?.since ?? 0))];
       if (atts.length) return [1, Math.min(...atts.map((a) => a?.since ?? 0))];
-      if (terms.some((t) => deck.isWorking(t))) return [2, 0];
-      if (terms.some((t) => deck.isIdleAgent(t))) return [3, 0];
+      if (terms.some((t) => deck.isWorking(t)) || ext.some((e) => e.status === 'busy')) return [2, 0];
+      if (terms.some((t) => deck.isIdleAgent(t)) || ext.length) return [3, 0];
       return [4, 0];
     };
     const repoOrder = new Map(deck.repos.map((r, i) => [r.name, i]));
@@ -2499,6 +2612,11 @@ function activate(ctx) {
       t.show(false);
       deck.markSeen(t);
     }),
+    vscode.commands.registerCommand('agentDeck.openExternal', (arg) => {
+      if (arg?.sessionId) deck.markExternalSeen(arg.sessionId);
+      if (arg?.bundle) execFile('/usr/bin/open', ['-b', arg.bundle], () => {});
+      else vscode.window.showInformationMessage(`Agent Deck: this Claude session runs in ${arg?.app ?? 'another app'}.`);
+    }),
     vscode.commands.registerCommand('agentDeck.goToTerminal', (t) => {
       if (t && vscode.window.terminals.includes(t)) goTo(t);
       alertItem.hide();
@@ -2788,7 +2906,7 @@ function activate(ctx) {
     await offerRefreshAfterReload();
   });
 
-  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh, goTo, focusByPid, home, openHome, closeOtherWorktreeTabs, readClipboardImage, transientNotice, alertItem, ensureNotifier: () => ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')) };
+  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh, goTo, focusByPid, home, openHome, closeOtherWorktreeTabs, readClipboardImage, appOfProcess, transientNotice, alertItem, ensureNotifier: () => ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')) };
 }
 
 function deactivate() {}
