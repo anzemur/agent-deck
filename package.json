@@ -513,7 +513,169 @@
           "description": "Branch name for New Task, with {type} (feat, fix, refactor, \u2026) and {slug} (from the task). Empty = follow how this repo's recent branches are named, e.g. \"anze/{type}/{slug}\"."
         }
       }
-    }
+    },
+    "colors": [
+      {
+        "id": "agentDeck.worktree1",
+        "description": "Agent Deck worktree colour 1 (terminal tab and card).",
+        "defaults": {
+          "dark": "#ee7777",
+          "light": "#a51212",
+          "highContrast": "#ee7777",
+          "highContrastLight": "#a51212"
+        }
+      },
+      {
+        "id": "agentDeck.worktree2",
+        "description": "Agent Deck worktree colour 2 (terminal tab and card).",
+        "defaults": {
+          "dark": "#77d0ee",
+          "light": "#117697",
+          "highContrast": "#77d0ee",
+          "highContrastLight": "#117697"
+        }
+      },
+      {
+        "id": "agentDeck.worktree3",
+        "description": "Agent Deck worktree colour 3 (terminal tab and card).",
+        "defaults": {
+          "dark": "#c6ee77",
+          "light": "#54770d",
+          "highContrast": "#c6ee77",
+          "highContrastLight": "#54770d"
+        }
+      },
+      {
+        "id": "agentDeck.worktree4",
+        "description": "Agent Deck worktree colour 4 (terminal tab and card).",
+        "defaults": {
+          "dark": "#bc77ee",
+          "light": "#6812a5",
+          "highContrast": "#bc77ee",
+          "highContrastLight": "#6812a5"
+        }
+      },
+      {
+        "id": "agentDeck.worktree5",
+        "description": "Agent Deck worktree colour 5 (terminal tab and card).",
+        "defaults": {
+          "dark": "#eec677",
+          "light": "#936710",
+          "highContrast": "#eec677",
+          "highContrastLight": "#936710"
+        }
+      },
+      {
+        "id": "agentDeck.worktree6",
+        "description": "Agent Deck worktree colour 6 (terminal tab and card).",
+        "defaults": {
+          "dark": "#808fef",
+          "light": "#1226a5",
+          "highContrast": "#808fef",
+          "highContrastLight": "#1226a5"
+        }
+      },
+      {
+        "id": "agentDeck.worktree7",
+        "description": "Agent Deck worktree colour 7 (terminal tab and card).",
+        "defaults": {
+          "dark": "#77eebc",
+          "light": "#0e7c4e",
+          "highContrast": "#77eebc",
+          "highContrastLight": "#0e7c4e"
+        }
+      },
+      {
+        "id": "agentDeck.worktree8",
+        "description": "Agent Deck worktree colour 8 (terminal tab and card).",
+        "defaults": {
+          "dark": "#ee77ca",
+          "light": "#a51279",
+          "highContrast": "#ee77ca",
+          "highContrastLight": "#a51279"
+        }
+      },
+      {
+        "id": "agentDeck.worktree9",
+        "description": "Agent Deck worktree colour 9 (terminal tab and card).",
+        "defaults": {
+          "dark": "#eb905c",
+          "light": "#b85014",
+          "highContrast": "#eb905c",
+          "highContrastLight": "#b85014"
+        }
+      },
+      {
+        "id": "agentDeck.worktree10",
+        "description": "Agent Deck worktree colour 10 (terminal tab and card).",
+        "defaults": {
+          "dark": "#5c9eeb",
+          "light": "#1565c1",
+          "highContrast": "#5c9eeb",
+          "highContrastLight": "#1565c1"
+        }
+      },
+      {
+        "id": "agentDeck.worktree11",
+        "description": "Agent Deck worktree colour 11 (terminal tab and card).",
+        "defaults": {
+          "dark": "#5ceb5c",
+          "light": "#0e810e",
+          "highContrast": "#5ceb5c",
+          "highContrastLight": "#0e810e"
+        }
+      },
+      {
+        "id": "agentDeck.worktree12",
+        "description": "Agent Deck worktree colour 12 (terminal tab and card).",
+        "defaults": {
+          "dark": "#df5ceb",
+          "light": "#b215c1",
+          "highContrast": "#df5ceb",
+          "highContrastLight": "#b215c1"
+        }
+      },
+      {
+        "id": "agentDeck.worktree13",
+        "description": "Agent Deck worktree colour 13 (terminal tab and card).",
+        "defaults": {
+          "dark": "#ebdf5c",
+          "light": "#776e0d",
+          "highContrast": "#ebdf5c",
+          "highContrastLight": "#776e0d"
+        }
+      },
+      {
+        "id": "agentDeck.worktree14",
+        "description": "Agent Deck worktree colour 14 (terminal tab and card).",
+        "defaults": {
+          "dark": "#9f84f0",
+          "light": "#4015c1",
+          "highContrast": "#9f84f0",
+          "highContrastLight": "#4015c1"
+        }
+      },
+      {
+        "id": "agentDeck.worktree15",
+        "description": "Agent Deck worktree colour 15 (terminal tab and card).",
+        "defaults": {
+          "dark": "#5cebe6",
+          "light": "#0e7c78",
+          "highContrast": "#5cebe6",
+          "highContrastLight": "#0e7c78"
+        }
+      },
+      {
+        "id": "agentDeck.worktree16",
+        "description": "Agent Deck worktree colour 16 (terminal tab and card).",
+        "defaults": {
+          "dark": "#ec6995",
+          "light": "#c1154f",
+          "highContrast": "#ec6995",
+          "highContrastLight": "#c1154f"
+        }
+      }
+    ]
   },
   "scripts": {
     "test": "./test/run.sh",

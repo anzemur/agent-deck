@@ -24,6 +24,9 @@ function parseCpuTime(t) {
     .split(':')
     .reduce((acc, part) => acc * 60 + Number(part), 0);
 }
+/** Our own palette (package.json → contributes.colors), handed out in this order: far-apart hues first. */
+const PALETTE = Array.from({ length: 16 }, (_, i) => `agentDeck.worktree${i + 1}`);
+/** Previous palette; only kept to recognise terminals created before the switch. */
 const COLORS = [
   'terminal.ansiCyan',
   'terminal.ansiMagenta',
@@ -692,6 +695,8 @@ class Deck {
     this.status = new Map();
     /** @type {Map<string, SessionInfo>} worktree path -> latest Claude session title / PR */
     this.sessions = new Map();
+    /** @type {Map<string, string>} worktree path -> colour id, stable for the worktree's lifetime */
+    this.colors = new Map(ctx.workspaceState.get('agentDeck.colors', []));
     /** @type {Map<string, string>} worktree path -> the task typed into New Task */
     this.taskTitles = new Map(ctx.workspaceState.get('agentDeck.taskTitles', []));
     /** @type {Map<string, PullRequest[]>} worktree path -> related pull requests */
@@ -790,6 +795,7 @@ class Deck {
 
     this.repos = [...byCommon.values()];
     this.adoptTerminals();
+    this.assignColors();
     this.watchGit();
     await this.poll(true);
 
@@ -906,6 +912,39 @@ class Deck {
       }
     }
     return { plan, skipped };
+  }
+
+  // ------------------------------------------------------------ colours
+
+  /** Theme colour id for a worktree (terminal tab + card). */
+  colorOf(wtPath) {
+    return this.colors.get(wtPath) ?? PALETTE[0];
+  }
+
+  /**
+   * Gives every worktree its own colour and keeps it. A worktree whose terminals already wear a
+   * colour (made before this palette existed) keeps that one so tabs and cards keep matching.
+   * New ones get the first free palette colour; once all 16 are taken, the least used one.
+   */
+  assignColors() {
+    const live = new Set(this.worktrees.map((w) => w.path));
+    for (const p of [...this.colors.keys()]) if (!live.has(p)) this.colors.delete(p); // deleted worktrees free theirs
+    for (const wt of this.worktrees) {
+      if (this.colors.has(wt.path)) continue;
+      const worn = this.terminalsOf(wt.path)
+        .map((t) => /** @type {vscode.TerminalOptions} */ (t.creationOptions)?.color)
+        .find((c) => c instanceof vscode.ThemeColor || (c && typeof c === 'object' && 'id' in c));
+      const wornId = worn && /** @type {any} */ (worn).id;
+      if (wornId && (COLORS.includes(wornId) || PALETTE.includes(wornId))) {
+        this.colors.set(wt.path, wornId);
+        continue;
+      }
+      const used = new Map();
+      for (const c of this.colors.values()) used.set(c, (used.get(c) ?? 0) + 1);
+      const free = PALETTE.find((c) => !used.has(c));
+      this.colors.set(wt.path, free ?? [...PALETTE].sort((a, b) => (used.get(a) ?? 0) - (used.get(b) ?? 0))[0]);
+    }
+    this.ctx.workspaceState.update('agentDeck.colors', [...this.colors]);
   }
 
   // ------------------------------------------------------------ clean up
@@ -1180,7 +1219,7 @@ class Deck {
       name,
       cwd: cwd ?? wt.path,
       iconPath: new vscode.ThemeIcon(wt.isMain ? 'repo' : 'git-branch'),
-      color: new vscode.ThemeColor(hashColor(wt.path)),
+      color: new vscode.ThemeColor(this.colorOf(wt.path)),
       env: { ...env, [ENV_KEY]: wt.path },
       location: cfg.get('terminalLocation') === 'editor' ? vscode.TerminalLocation.Editor : vscode.TerminalLocation.Panel,
     });
@@ -1366,7 +1405,7 @@ function buildModel(deck, termId) {
 
     return {
       path: wt.path, repo: wt.repo.name, title, branch: wtLabel(wt), isMain: wt.isMain, active,
-      colorVar: `var(--vscode-${hashColor(wt.path).replace(/\./g, '-')})`,
+      colorVar: `var(--vscode-${deck.colorOf(wt.path).replace(/\./g, '-')})`,
       state: attention ? 'attention' : working ? 'working' : idle ? 'idle' : '',
       // Badges: "●3" on the active worktree, plain change count on the others.
       badge: active ? `●${n || ''}` : n ? String(n) : '',

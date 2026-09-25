@@ -195,7 +195,7 @@ exports.run = async function () {
     await vscode.commands.executeCommand('agentDeck.selectWorktree', b.path);
     const mb = wtModel(b), ma = wtModel(a);
     assert.ok(mb.active && !ma.active);
-    assert.match(mb.colorVar, /--vscode-terminal-ansi/);
+    assert.match(mb.colorVar, /--vscode-(agentDeck-worktree\d+|terminal-ansi)/);
     assert.match(mb.badge, /^●/);
     assert.ok(!ma.badge.includes('●'));
     await until(() => panel.view?.description === 'Fix login redirect', 'header shows active worktree');
@@ -452,6 +452,19 @@ exports.run = async function () {
     assert.ok(!fsx.existsSync(pDone) && fsx.existsSync(pDirty) && fsx.existsSync(pAhead));
     assert.ok(!cpx.execSync('git branch --list done-x', { cwd: main.path }).toString().trim(), 'merged branch deleted');
     console.log('✓ Clean Up removed only the finished worktree and its merged branch; the others are untouched');
+  }
+
+  // Colours: every worktree gets its own, stable, and matching its terminal tab.
+  {
+    const ids = deck.worktrees.map((w) => deck.colorOf(w.path));
+    assert.strictEqual(new Set(ids).size, ids.length, `all different: ${ids.join(', ')}`);
+    const before = new Map(deck.worktrees.map((w) => [w.path, deck.colorOf(w.path)]));
+    await deck.refresh();
+    assert.ok(deck.worktrees.every((w) => deck.colorOf(w.path) === before.get(w.path)), 'stable across refreshes');
+    const withTerm = deck.worktrees.find((w) => deck.terminalsOf(w.path).some((t) => t.creationOptions?.color));
+    const tabColor = deck.terminalsOf(withTerm.path).find((t) => t.creationOptions?.color).creationOptions.color.id;
+    assert.strictEqual(tabColor, deck.colorOf(withTerm.path));
+    console.log(`✓ ${ids.length} worktrees, ${new Set(ids).size} different colours, stable, tab colour = card colour`);
   }
   console.log('ALL PASSED');
 };
