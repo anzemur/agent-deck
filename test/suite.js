@@ -531,5 +531,19 @@ exports.run = async function () {
     assert.strictEqual(deck.active, deck.worktreeOf(target).path);
     console.log('✓ clicking the notification (focus?pid=…) jumps to that agent\'s terminal and worktree');
   }
+
+  // In-editor alert disappears on its own; its status bar item jumps to the agent.
+  {
+    const target = vscode.window.terminals.find((t) => deck.worktreeOf(t));
+    const other = vscode.window.terminals.find((t) => t !== target);
+    other.show();
+    ext.exports.transientNotice(target, 'test — agent finished', 2);
+    assert.match(ext.exports.alertItem.text, /agent finished/);
+    await vscode.commands.executeCommand(ext.exports.alertItem.command.command, ...ext.exports.alertItem.command.arguments);
+    await until(() => vscode.window.activeTerminal === target, 'status item jumped');
+    ext.exports.transientNotice(target, 'test — agent finished', 1);
+    await sleep(1600);
+    console.log('✓ alert: countdown notice + status bar item that jumps to the agent, gone after its time');
+  }
   console.log('ALL PASSED');
 };

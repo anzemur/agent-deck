@@ -1960,11 +1960,51 @@ function activate(ctx) {
     if (!cfg.get('notifications', true)) return;
     const what = attention.kind === 'waiting' ? attentionWhat(attention) : 'finished';
     const title = wtTitle(worktree, deck);
-    vscode.window.showInformationMessage(`${title} — agent ${what}`, 'Show').then((c) => c && goTo(terminal));
+    const secs = Number(cfg.get('notificationSeconds', 12));
+    if (secs > 0) {
+      transientNotice(terminal, `${title} — agent ${what}`, secs);
+    } else {
+      vscode.window.showInformationMessage(`${title} — agent ${what}`, 'Show').then((c) => c && goTo(terminal));
+    }
     if (!vscode.window.state.focused && cfg.get('macNotifications', true) && process.platform === 'darwin') {
       macNotify(terminal, worktree, attention, title, what);
     }
   });
+
+  /**
+   * An in-editor alert that goes away on its own after `secs`. Regular notifications only count
+   * down while the window is focused and then linger in the notification list; a progress
+   * notification closes (and leaves nothing behind) the moment its task ends, so it's used as a
+   * countdown. It can't carry a Show button, so a clickable status bar item flashes alongside.
+   */
+  const alertItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
+  alertItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+  ctx.subscriptions.push(alertItem);
+  let alertTimer;
+  const transientNotice = (terminal, text, secs) => {
+    vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: text, cancellable: true }, (progress, token) =>
+      new Promise((done) => {
+        let left = secs;
+        progress.report({ message: '⌘⌥N to jump there' });
+        const tick = setInterval(() => {
+          left--;
+          progress.report({ increment: 100 / secs });
+          if (left <= 0) finish();
+        }, 1000);
+        const finish = () => {
+          clearInterval(tick);
+          done(undefined);
+        };
+        token.onCancellationRequested(finish);
+      }),
+    );
+    alertItem.text = `$(bell-dot) ${text}`;
+    alertItem.tooltip = 'Jump to this agent';
+    alertItem.command = { command: 'agentDeck.goToTerminal', title: 'Jump to agent', arguments: [terminal] };
+    alertItem.show();
+    clearTimeout(alertTimer);
+    alertTimer = setTimeout(() => alertItem.hide(), secs * 1000);
+  };
 
   /** macOS notification that opens Cursor on this agent's terminal when clicked. */
   const macNotify = async (terminal, worktree, attention, title, what) => {
@@ -2221,6 +2261,10 @@ function activate(ctx) {
       }
       t.show(false);
       deck.markSeen(t);
+    }),
+    vscode.commands.registerCommand('agentDeck.goToTerminal', (t) => {
+      if (t && vscode.window.terminals.includes(t)) goTo(t);
+      alertItem.hide();
     }),
     vscode.commands.registerCommand('agentDeck.nextAttention', () => {
       const next = deck.attentionList()[0];
@@ -2486,7 +2530,7 @@ function activate(ctx) {
     await offerRefreshAfterReload();
   });
 
-  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh, goTo, focusByPid, ensureNotifier: () => ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')) };
+  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh, goTo, focusByPid, transientNotice, alertItem, ensureNotifier: () => ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')) };
 }
 
 function deactivate() {}

@@ -228,6 +228,11 @@
         "title": "Sort: Default Order",
         "icon": "$(bell-slash)",
         "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.goToTerminal",
+        "title": "Jump to Agent",
+        "category": "Agent Deck"
       }
     ],
     "menus": {
@@ -329,6 +334,10 @@
         },
         {
           "command": "agentDeck.copyPrLink",
+          "when": "false"
+        },
+        {
+          "command": "agentDeck.goToTerminal",
           "when": "false"
         }
       ],
@@ -551,6 +560,12 @@
             "Needs you first, then working, then idle, then the rest"
           ],
           "description": "Order of worktrees in the panel. Also toggled from the bell in the Worktrees header."
+        },
+        "agentDeck.notificationSeconds": {
+          "type": "number",
+          "default": 12,
+          "minimum": 0,
+          "description": "How long the in-editor \"agent needs you / finished\" alert stays before it disappears on its own (with a countdown bar and a clickable status bar item). 0 = keep it until you dismiss it (with a Show button)."
         }
       }
     },
