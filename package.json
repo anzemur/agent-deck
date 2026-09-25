@@ -14,7 +14,8 @@
   ],
   "main": "./extension.js",
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onWebviewPanel:agentDeck.home"
   ],
   "repository": {
     "type": "git",
@@ -48,6 +49,12 @@
         "command": "agentDeck.newTask",
         "title": "New Task\u2026",
         "icon": "$(sparkle)",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.openHome",
+        "title": "Open Home",
+        "icon": "$(home)",
         "category": "Agent Deck"
       },
       {
@@ -239,6 +246,11 @@
       "view/title": [
         {
           "command": "agentDeck.newTask",
+          "when": "view == agentDeck.worktrees",
+          "group": "navigation@0"
+        },
+        {
+          "command": "agentDeck.openHome",
           "when": "view == agentDeck.worktrees",
           "group": "navigation@0"
         },
@@ -566,6 +578,16 @@
           "default": 12,
           "minimum": 0,
           "description": "How long the in-editor \"agent needs you / finished\" alert stays before it disappears on its own (with a countdown bar and a clickable status bar item). 0 = keep it until you dismiss it (with a Show button)."
+        },
+        "agentDeck.richTaskInput": {
+          "type": "boolean",
+          "default": true,
+          "description": "New Task opens the Agent Deck home page with a multi-line composer (\u23ce start, \u2325\u23ce new line). Off = two single-line input boxes."
+        },
+        "agentDeck.homeOnStartup": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open the Agent Deck home page (New Task + agents overview) when a window starts with no editors, instead of the editor's welcome page."
         }
       }
     },

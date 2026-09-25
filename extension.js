@@ -677,6 +677,8 @@ function branchType(text) {
  * (e.g. "anze/fix/…" → "anze/{type}/{slug}", "feat/…" → "{type}/{slug}").
  */
 async function suggestBranch(repo, text) {
+  // Multi-line tasks: the first line is the summary; the rest is detail.
+  text = text.split('\n').map((l) => l.trim()).find(Boolean) ?? text;
   const out = await git(repo.root, ['for-each-ref', '--sort=-committerdate', '--count=30', '--format=%(refname:short)', 'refs/heads']).catch(() => '');
   const types = new Set(Object.values(BRANCH_TYPES).concat('feat'));
   const patterns = new Map();
@@ -1574,6 +1576,11 @@ class PanelProvider {
     this.view?.webview.postMessage({ type: 'state', model: this.model() });
   }
 
+  /** Send anything to the webview. */
+  send(msg) {
+    this.view?.webview.postMessage(msg);
+  }
+
   reveal(wtPath) {
     this.view?.webview.postMessage({ type: 'reveal', path: wtPath });
   }
@@ -1612,6 +1619,97 @@ class PanelProvider {
 
 /** @type {WeakMap<vscode.Terminal, string>} */
 const lastCommand = new WeakMap();
+
+// ---------------------------------------------------------------- home page (editor tab)
+
+/**
+ * The Agent Deck home tab: a big New Task composer and an overview of every agent. One instance;
+ * restored across reloads through a serializer. Renders the same model as the sidebar panel.
+ */
+class HomePage {
+  /** @param {vscode.ExtensionContext} ctx @param {Deck} deck @param {() => any} model */
+  constructor(ctx, deck, model) {
+    this.ctx = ctx;
+    this.deck = deck;
+    this.model = model;
+    /** @type {vscode.WebviewPanel | undefined} */
+    this.panel = undefined;
+    this._onMessage = new vscode.EventEmitter();
+    /** Everything the page sends: select, task.suggest, task.create. */
+    this.onMessage = this._onMessage.event;
+    this.extra = async () => ({});
+    this.pending = undefined;
+    deck.onChange(() => this.schedule());
+  }
+
+  get isOpen() {
+    return !!this.panel;
+  }
+
+  /** Opens (or reveals) the tab. `focus`: put the cursor in the composer. */
+  show({ focus = false, preserveFocus = false } = {}) {
+    if (!this.panel) {
+      const panel = vscode.window.createWebviewPanel('agentDeck.home', 'Agent Deck', { viewColumn: vscode.ViewColumn.One, preserveFocus }, {
+        enableScripts: true,
+        retainContextWhenHidden: true,
+        localResourceRoots: [vscode.Uri.joinPath(this.ctx.extensionUri, 'media')],
+      });
+      this.attach(panel);
+    } else {
+      this.panel.reveal(undefined, preserveFocus);
+    }
+    if (focus) this.send({ type: 'focus' });
+  }
+
+  /** @param {vscode.WebviewPanel} panel */
+  attach(panel) {
+    this.panel = panel;
+    const media = vscode.Uri.joinPath(this.ctx.extensionUri, 'media');
+    panel.iconPath = vscode.Uri.joinPath(media, 'deck.svg');
+    panel.webview.options = { enableScripts: true, localResourceRoots: [media] };
+    const uri = (f) => panel.webview.asWebviewUri(vscode.Uri.joinPath(media, f));
+    const nonce = [...Array(24)].map(() => Math.random().toString(36)[2]).join('');
+    const csp = panel.webview.cspSource;
+    const mark = fs.readFileSync(path.join(this.ctx.extensionPath, 'media', 'deck.svg'), 'utf8');
+    panel.webview.html = `<!doctype html><html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; font-src ${csp}; style-src ${csp} 'unsafe-inline'; img-src ${csp}; script-src 'nonce-${nonce}';">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>@font-face { font-family: 'codicon'; src: url('${uri('codicon.ttf')}') format('truetype'); }</style>
+<link rel="stylesheet" href="${uri('home.css')}">
+<title>Agent Deck</title>
+</head><body>
+<div class="page">
+  <header class="top"><span class="mark">${mark}Agent Deck</span><span class="sep">/</span><span id="where"></span><span class="counts" id="counts"></span></header>
+  <section class="hero" id="hero"></section>
+  <div id="groups" class="groups" style="display:grid;gap:28px"></div>
+</div>
+<script nonce="${nonce}" src="${uri('home.js')}"></script>
+</body></html>`;
+    panel.webview.onDidReceiveMessage((m) => {
+      if (m.type === 'ready') this.post();
+      else this._onMessage.fire(m);
+    });
+    panel.onDidChangeViewState(() => panel.visible && this.post());
+    panel.onDidDispose(() => (this.panel = undefined));
+  }
+
+  send(msg) {
+    this.panel?.webview.postMessage(msg);
+  }
+
+  schedule() {
+    if (!this.panel || this.pending) return;
+    this.pending = setTimeout(async () => {
+      this.pending = undefined;
+      await this.post();
+    }, 60);
+  }
+
+  async post() {
+    if (!this.panel) return;
+    this.send({ type: 'state', model: this.model(), ...(await this.extra()) });
+  }
+}
 
 // ---------------------------------------------------------------- files tree
 
@@ -1852,6 +1950,7 @@ function activate(ctx) {
         await git(repo.root, exists ? ['worktree', 'add', target, branch] : ['worktree', 'add', '--no-track', '-b', branch, target, base.ref]);
       });
     } catch (e) {
+      console.error('[agent-deck] creating worktree failed:', e.message);
       vscode.window.showErrorMessage(`Agent Deck: ${e.message}`);
       return undefined;
     }
@@ -1943,6 +2042,51 @@ function activate(ctx) {
       cfg.update('offerRefreshAfterReload', false, vscode.ConfigurationTarget.Global);
     }
   };
+
+  // ---- Home page: New Task composer + agents overview -------------------------------------------
+
+  /** Repo a new task targets: the one picked on the page, else the active worktree's, else the first. */
+  const taskRepo = (root) =>
+    (root && deck.repos.find((r) => r.root === root)) ?? (deck.active && deck.findWorktree(deck.active)?.repo) ?? deck.repos[0];
+
+  const home = new HomePage(ctx, deck, () => panel.model());
+  home.extra = async () => {
+    const repo = taskRepo();
+    return {
+      repos: deck.repos.map((r) => ({ root: r.root, name: r.name })),
+      repo: repo?.root,
+      repoName: repo?.name,
+      base: repo ? await baseRefLabel(repo) : '',
+    };
+  };
+  const openHome = (opts = {}) => home.show(opts);
+
+  home.onMessage(async (m) => {
+    if (m.type === 'select') {
+      deck.switchTo(m.path);
+      return;
+    }
+    const repo = taskRepo(m.repo);
+    if (!repo) return;
+    if (m.type === 'task.suggest') {
+      const text = String(m.text ?? '').trim();
+      home.send({ type: 'task.suggested', seq: m.seq, branch: text ? await suggestBranch(repo, text) : '', base: await baseRefLabel(repo) });
+    } else if (m.type === 'task.create') {
+      const prompt = String(m.prompt ?? '').trim();
+      const branch = String(m.branch ?? '').trim();
+      const bad = branch && validateBranch(branch);
+      if (!prompt || bad) return home.send({ type: 'task.error', message: bad || 'Describe the task first.' });
+      const made = await vscode.commands.executeCommand('agentDeck.newTask', { prompt, branch: branch || undefined, wtPath: repo.root });
+      home.send(made ? { type: 'task.done' } : { type: 'task.error', message: "Couldn't create the worktree (see the error notification)." });
+    }
+  });
+  ctx.subscriptions.push(
+    vscode.window.registerWebviewPanelSerializer('agentDeck.home', {
+      async deserializeWebviewPanel(panel) {
+        home.attach(panel);
+      },
+    }),
+  );
 
   /** Jump to a terminal that needs you: its worktree becomes active and the terminal is focused. */
   const goTo = (t) => {
@@ -2219,6 +2363,7 @@ function activate(ctx) {
       applyRefresh(plan);
     }),
     vscode.commands.registerCommand('agentDeck.goToFileInWorktree', () => goToFile()),
+    vscode.commands.registerCommand('agentDeck.openHome', () => openHome({ focus: true })),
     vscode.commands.registerCommand('agentDeck.sortByAttention', () =>
       vscode.workspace.getConfiguration('agentDeck').update('sortBy', 'attention', vscode.ConfigurationTarget.Global),
     ),
@@ -2336,6 +2481,7 @@ function activate(ctx) {
 
     vscode.commands.registerCommand('agentDeck.newTask', async (arg) => {
       // arg lets tests (and keybindings) skip the prompts: { prompt, branch }.
+      if (!arg?.prompt && vscode.workspace.getConfiguration('agentDeck').get('richTaskInput', true)) return openHome({ focus: true });
       const repo = (arg?.wtPath && deck.findWorktree(arg.wtPath)?.repo) ?? (await pickRepo());
       if (!repo) return;
       const task = arg?.prompt ?? (await vscode.window.showInputBox({
@@ -2483,6 +2629,21 @@ function activate(ctx) {
     }),
   );
 
+  // Home page instead of the editor's welcome page: open it when the window starts with nothing
+  // open (a restored Home tab comes back through the serializer on its own). The first time, the
+  // built-in welcome page is switched off so the two don't compete.
+  const cfgHome = vscode.workspace.getConfiguration('agentDeck');
+  if (cfgHome.get('homeOnStartup', true)) {
+    if (!ctx.globalState.get('agentDeck.welcomeReplaced')) {
+      ctx.globalState.update('agentDeck.welcomeReplaced', true);
+      vscode.workspace.getConfiguration('workbench').update('startupEditor', 'none', vscode.ConfigurationTarget.Global);
+    }
+    setTimeout(() => {
+      const nothingOpen = vscode.window.tabGroups.all.every((g) => g.tabs.length === 0);
+      if (nothingOpen && !home.isOpen) openHome({ preserveFocus: true });
+    }, 800);
+  }
+
   // Open the Agent Deck sidebar on start / reload instead of whatever was showing (usually Explorer).
   if (vscode.workspace.getConfiguration('agentDeck').get('showOnStartup', true)) {
     vscode.commands.executeCommand('workbench.view.extension.agentDeck').then(undefined, () => {});
@@ -2530,7 +2691,7 @@ function activate(ctx) {
     await offerRefreshAfterReload();
   });
 
-  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh, goTo, focusByPid, transientNotice, alertItem, ensureNotifier: () => ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')) };
+  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh, goTo, focusByPid, home, openHome, transientNotice, alertItem, ensureNotifier: () => ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')) };
 }
 
 function deactivate() {}

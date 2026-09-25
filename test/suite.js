@@ -385,6 +385,7 @@ exports.run = async function () {
     fsx.appendFileSync(path.join(main.path, '.gitignore'), '.env\n');
     fsx.writeFileSync(path.join(main.path, '.env'), 'SECRET=1\n');
     const created = await vscode.commands.executeCommand('agentDeck.newTask', { prompt: 'Fix the flaky login redirect test!' });
+    if (!created) console.log('DEBUG newTask returned', created, 'repos', deck.repos.map((r) => r.root), 'worktrees', deck.worktrees.map((w) => w.branch));
     const wt = deck.findWorktree(created);
     assert.ok(wt, `worktree created: ${created}`);
     assert.strictEqual(wt.branch, 'flaky-login-redirect-test');
@@ -544,6 +545,32 @@ exports.run = async function () {
     ext.exports.transientNotice(target, 'test — agent finished', 1);
     await sleep(1600);
     console.log('✓ alert: countdown notice + status bar item that jumps to the agent, gone after its time');
+  }
+
+  // Home page: opens as an editor tab; typing gets a branch suggestion (from the first line);
+  // Start creates the task with the full multi-line text; bad branch names are refused.
+  {
+    const { home } = ext.exports;
+    ext.exports.openHome({ focus: true });
+    await until(() => home.isOpen && vscode.window.tabGroups.all.some((g) => g.tabs.some((t) => t.label === 'Agent Deck')), 'home tab open');
+    const sent = [];
+    const origSend = home.send.bind(home);
+    home.send = (m) => (sent.push(m), origSend(m));
+    await home.post();
+    const state = sent.find((m) => m.type === 'state');
+    assert.ok(state.model.worktrees.length >= 3 && state.base && state.repo);
+    home._onMessage.fire({ type: 'task.suggest', text: 'Refactor the payment retry queue\n\n- keep the public API', seq: 7, repo: main.path });
+    await until(() => sent.some((m) => m.type === 'task.suggested' && m.seq === 7), 'suggestion');
+    assert.strictEqual(sent.find((m) => m.type === 'task.suggested').branch, 'payment-retry-queue');
+    const prompt = 'Refactor the payment retry queue\n\n- keep the public API\n- add tests';
+    home._onMessage.fire({ type: 'task.create', prompt, branch: '', repo: main.path });
+    await until(() => sent.some((m) => m.type === 'task.done'), 'task created', 20000);
+    assert.ok(deck.worktrees.find((w) => w.branch === 'payment-retry-queue'), 'worktree for the task');
+    await until(() => require('child_process').spawnSync('pgrep', ['-f', 'claude 120 Refactor the payment retry queue']).stdout.toString().trim(), 'claude got the multi-line prompt', 15000);
+    home._onMessage.fire({ type: 'task.create', prompt: 'x', branch: 'bad branch name', repo: main.path });
+    await until(() => sent.some((m) => m.type === 'task.error'), 'bad branch rejected');
+    home.send = origSend;
+    console.log('✓ home page: opens as a tab, suggests "payment-retry-queue" from the first line, Start launches claude with the full multi-line task; bad branch refused');
   }
   console.log('ALL PASSED');
 };

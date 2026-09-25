@@ -121,3 +121,4 @@ body.vscode-light .seti, body.vscode-high-contrast-light .seti { color: var(--fc
 .wt .meta .done { color: var(--vscode-charts-purple, #a371f7); }
 .wt .cleanup { flex: none; margin-top: -2px; }
 .wt .cleanup .act { color: var(--vscode-charts-purple, #a371f7); }
+
