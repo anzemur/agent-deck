@@ -29,10 +29,7 @@
 
   const hero = $('#hero');
   hero.innerHTML = `
-    <div>
-      <h1>What should an agent do next?</h1>
-      <p>Describe the task. It gets its own branch and worktree from the latest base, set up and ready, with Claude started on it.</p>
-    </div>
+    <h1>What should we build next?</h1>
     <div class="composer" id="composer">
       <textarea id="text" aria-label="Task" placeholder="Fix the flaky login redirect test — it fails when the session cookie expires mid-redirect.&#10;&#10;Keep the public API; add a regression test."></textarea>
       <div class="bar">
@@ -41,11 +38,11 @@
         <span class="chip" id="base-chip" title="New branch starts from this, freshly fetched"></span>
         <span class="right">
           <span class="error" id="error"></span>
-          <span class="hint"><kbd>⌥</kbd> <kbd>⏎</kbd> new line</span>
           <button class="go" id="go">${ci('sparkle')}<span>Start</span> <kbd>⏎</kbd></button>
         </span>
       </div>
-    </div>`;
+    </div>
+    <p class="hint"><kbd>⏎</kbd> to start · <kbd>⌥</kbd><kbd>⏎</kbd> new line</p>`;
   const ta = /** @type {HTMLTextAreaElement} */ ($('#text'));
   const branch = /** @type {HTMLInputElement} */ ($('#branch'));
   const repoSel = /** @type {HTMLSelectElement} */ ($('#repo'));
