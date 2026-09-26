@@ -2879,7 +2879,7 @@ function activate(ctx) {
       if (wt && arg?.path) vscode.commands.executeCommand('vscode.open', vscode.Uri.file(path.join(wt.path, arg.path)));
     }),
     vscode.commands.registerCommand('agentDeck.stage', (arg) => gitOnFiles(arg, (paths) => ['add', '-A', '--', ...paths])),
-    vscode.commands.registerCommand('agentDeck.unstage', (arg) => gitOnFiles(arg, (paths) => ['restore', '--staged', '--', ...paths])),
+    vscode.commands.registerCommand('agentDeck.unstage', (arg) => gitOnFiles(arg, (paths) => ['reset', '-q', '--', ...paths])),
 
     vscode.commands.registerCommand('agentDeck.newWorktree', async (arg) => {
       const repo = (arg?.wtPath && deck.findWorktree(arg.wtPath)?.repo) ?? (await pickRepo());

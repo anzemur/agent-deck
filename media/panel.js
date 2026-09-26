@@ -173,6 +173,12 @@
       vscode.postMessage({ type: 'select', path: el.dataset.wt });
       return;
     }
+    if (btn && (el.dataset.cmd === 'agentDeck.stage' || el.dataset.cmd === 'agentDeck.unstage')) {
+      // One git action per click: the row keeps its old button until the next render, so a
+      // double click would otherwise re-run the action on a path that is no longer staged.
+      btn.disabled = true;
+      setTimeout(() => (btn.disabled = false), 4000);
+    }
     vscode.postMessage({ type: 'command', command: el.dataset.cmd, arg: JSON.parse(el.dataset.arg || 'null') });
   });
 

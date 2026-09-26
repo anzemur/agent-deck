@@ -59,6 +59,7 @@ body.vscode-light .seti, body.vscode-high-contrast-light .seti { color: var(--fc
   display: inline-flex; align-items: center; justify-content: center;
 }
 .act:hover { background: var(--vscode-toolbar-hoverBackground); }
+.act:disabled { opacity: 0.4; pointer-events: none; }
 .act:focus-visible { outline: 1px solid var(--focus); }
 
 /* ---- worktree card ---- */

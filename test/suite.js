@@ -165,6 +165,24 @@ exports.run = async function () {
   await until(() => !deck.changesOf(a.path, 'staged').some((c) => c.path === 'README.md'), 'README unstaged');
   console.log('✓ unstage command works');
 
+  // Unstage must tolerate paths that are no longer in the index (double click, or "Unstage All"
+  // from a panel that has not re-rendered yet): git must still unstage the rest of the batch.
+  fsx.writeFileSync(path.join(a.path, 'stale.txt'), 'z\n');
+  require('child_process').execSync('git add stale.txt', { cwd: a.path });
+  await deck.poll();
+  assert.deepStrictEqual(deck.changesOf(a.path, 'staged').map((c) => c.path).sort(), ['staged.txt', 'stale.txt']);
+  require('child_process').execSync('git reset -q -- stale.txt', { cwd: a.path }); // panel is now stale
+  await vscode.commands.executeCommand('agentDeck.unstage', { wtPath: a.path, group: 'staged' });
+  await until(() => deck.changesOf(a.path, 'staged').length === 0, 'Unstage All completes despite a stale (untracked) path');
+  console.log('✓ unstage ignores paths already gone from the index; batch still completes');
+
+  // Index changes made outside the extension in a non-active linked worktree reach the panel via
+  // the .git watcher, well before the 16s background status refresh for inactive worktrees.
+  fsx.writeFileSync(path.join(b.path, 'watched.txt'), 'w\n');
+  require('child_process').execSync('git add watched.txt', { cwd: b.path });
+  await until(() => deck.changesOf(b.path, 'staged').some((c) => c.path === 'watched.txt'), 'git watcher picks up index change in linked worktree', 3000);
+  console.log('✓ external git add in inactive worktree shows up within 3s (watcher)');
+
   // Worktree label follows the Claude session title; /rename wins; PR number shows.
   {
     const fsx = require('fs');
