@@ -13,7 +13,7 @@
     'git-pull-request': '\uea64', 'git-pull-request-draft': '\uebdb', 'git-merge': '\ueafe',
     'git-pull-request-closed': '\uebda', 'play-circle': '\ueba6', check: '\ueab2',
     'link-external': '\ueb14', folder: '\uea83', 'empty-window': '\ueae4',
-    'arrow-up': '\ueaa1', 'arrow-down': '\uea9a', bell: '\ueaa2', 'bell-dot': '\ueb9a', trash: '\uea81',
+    'arrow-up': '\ueaa1', 'arrow-down': '\uea9a', bell: '\ueaa2', 'bell-dot': '\ueb9a', trash: '\uea81', note: '\ueb26',
   };
 
   /** @type {any} */
@@ -83,6 +83,12 @@
           : `<div class="row" tabindex="-1" data-cmd="agentDeck.newTerminal" data-arg="${esc(JSON.stringify(wtArg))}">${ci('add')}<span class="grow"><span class="name">New terminal</span></span></div>`;
         return `<div class="sec">Terminals <span class="count">${s.terminals.length || ''}</span><span class="actions">${act('add', 'New Terminal', 'agentDeck.newTerminal', wtArg)}</span></div>${rows}`;
       }
+      case 'notes':
+        return `<div class="sec">Notes<span class="actions">${act('edit', 'Open notes', 'agentDeck.openNotes', wtArg)}</span></div>
+          <div class="row" tabindex="-1" data-cmd="agentDeck.openNotes" data-arg="${esc(JSON.stringify(wtArg))}" title="${esc(w.path)}/.agent-deck/notes.md">
+            ${ci('note', '', s.preview ? `color:${w.colorVar}` : '')}
+            <span class="grow">${s.preview ? `<span class="sub" style="color:var(--fg)">${esc(s.preview)}</span>` : '<span class="sub">Add notes…</span>'}</span>
+          </div>`;
       case 'prs': {
         const rows = s.prs
           .map(
@@ -114,7 +120,7 @@
       ${ci(open ? 'chevron-down' : 'chevron-right', 'twisty')}
       ${stateIcon}
       <span class="text"><span class="title">${esc(w.title)}</span><span class="meta">${meta}</span></span>
-      <span class="actions">${act('terminal', 'New Terminal', 'agentDeck.newTerminal', { wtPath: w.path })}${act('empty-window', 'Open in New Window', 'agentDeck.openInNewWindow', { wtPath: w.path })}</span>
+      <span class="actions">${act('note', 'Notes', 'agentDeck.openNotes', { wtPath: w.path })}${act('terminal', 'New Terminal', 'agentDeck.newTerminal', { wtPath: w.path })}${act('empty-window', 'Open in New Window', 'agentDeck.openInNewWindow', { wtPath: w.path })}</span>
       ${w.cleanable ? `<span class="cleanup">${act('trash', 'Clean up: delete this finished worktree', 'agentDeck.removeWorktree', { wtPath: w.path })}</span>` : ''}
       <span class="badge">${esc(w.badge)}</span>
     </div>`;

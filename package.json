@@ -256,6 +256,12 @@
         "title": "Bring All Sessions Here (from Superset, iTerm, \u2026)",
         "icon": "$(arrow-circle-down)",
         "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.openNotes",
+        "title": "Open Worktree Notes",
+        "icon": "$(note)",
+        "category": "Agent Deck"
       }
     ],
     "menus": {
@@ -394,6 +400,11 @@
           "group": "1_main@2"
         },
         {
+          "command": "agentDeck.openNotes",
+          "when": "webviewId == 'agentDeck.worktrees' && webviewSection == 'worktree'",
+          "group": "1_main@3"
+        },
+        {
           "command": "agentDeck.openPr",
           "when": "webviewId == 'agentDeck.worktrees' && webviewSection == 'worktree' && hasPr",
           "group": "1_main@3"
@@ -507,6 +518,11 @@
         "command": "agentDeck.newTask",
         "key": "cmd+alt+t",
         "mac": "cmd+alt+t"
+      },
+      {
+        "command": "agentDeck.openNotes",
+        "key": "cmd+alt+m",
+        "mac": "cmd+alt+m"
       }
     ],
     "configuration": {

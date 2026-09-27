@@ -575,7 +575,14 @@ function findClaudeLogo() {
  * @param {string} zip path of the bundled terminal-notifier zip
  * @returns {Promise<boolean>} whether the app is ready
  */
-async function ensureNotifier(zip) {
+/** @type {Promise<boolean> | undefined} one build at a time; concurrent callers share it */
+let notifierBuild;
+function ensureNotifier(zip) {
+  notifierBuild ??= buildNotifier(zip).finally(() => (notifierBuild = undefined));
+  return notifierBuild;
+}
+
+async function buildNotifier(zip) {
   const marker = path.join(NOTIFIER_APP, 'Contents', 'agent-deck-version');
   try {
     if (fs.readFileSync(marker, 'utf8') === NOTIFIER_VERSION) return true;
@@ -857,6 +864,52 @@ function runTeardown(repo, wtPath) {
       resolve({ ran: cmds.length, error: err ? (stderr || err.message).trim().split('\n').slice(-3).join(' ') : undefined }),
     );
   });
+}
+
+// ---------------------------------------------------------------- per-worktree notes
+
+const NOTES_REL = path.join('.agent-deck', 'notes.md');
+const NOTES_ARCHIVE = process.env.AGENT_DECK_NOTES_ARCHIVE || path.join(os.homedir(), '.agent-deck', 'notes-archive');
+/** @type {Map<string, { mtimeMs: number, size: number, info: { preview: string, empty: boolean } }>} */
+const notesCache = new Map();
+
+/** First real line of a worktree's notes (the generated title heading doesn't count). */
+function notesInfo(wtPath) {
+  const file = path.join(wtPath, NOTES_REL);
+  let st;
+  try {
+    st = fs.statSync(file);
+  } catch {
+    return undefined;
+  }
+  const hit = notesCache.get(file);
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.info;
+  let text = '';
+  try {
+    const fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(Math.min(st.size, 4096));
+    fs.readSync(fd, buf, 0, buf.length, 0);
+    fs.closeSync(fd);
+    text = buf.toString('utf8');
+  } catch {}
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const body = lines[0]?.startsWith('# ') ? lines.slice(1) : lines;
+  const info = { preview: (body[0] ?? '').replace(/^[#>*\-\s]+/, '').slice(0, 120), empty: body.length === 0 };
+  notesCache.set(file, { mtimeMs: st.mtimeMs, size: st.size, info });
+  return info;
+}
+
+/** Copy a worktree's notes to ~/.agent-deck/notes-archive/ (before the worktree is deleted). */
+function archiveNotes(wt) {
+  const file = path.join(wt.path, NOTES_REL);
+  const info = notesInfo(wt.path);
+  if (!info || info.empty) return undefined;
+  fs.mkdirSync(NOTES_ARCHIVE, { recursive: true });
+  const name = `${(wt.branch ?? path.basename(wt.path)).replace(/[^\w.-]+/g, '-')}-${new Date().toISOString().slice(0, 10)}`;
+  let out = path.join(NOTES_ARCHIVE, `${name}.md`);
+  for (let i = 2; fs.existsSync(out); i++) out = path.join(NOTES_ARCHIVE, `${name}-${i}.md`);
+  fs.copyFileSync(file, out);
+  return out;
 }
 
 /** Keep <worktree>/.agent-deck/ out of git, via the repo's local info/exclude (never a tracked file). */
@@ -1709,6 +1762,8 @@ function buildModel(deck, termId) {
     if (done) meta.push({ icon: done.pr.state === 'MERGED' ? 'git-merge' : 'git-pull-request-closed', text: `${done.pr.state === 'MERGED' ? 'merged' : 'closed'} · clean up`, cls: 'done' });
     meta.push({ icon: 'git-branch', text: wtLabel(wt) });
     if (ownPr) meta.push({ icon: 'git-pull-request', text: `#${ownPr.number}` });
+    const notes = notesInfo(wt.path);
+    if (notes && !notes.empty) meta.push({ icon: 'note', text: 'notes' });
     if (st?.ahead || st?.behind) meta.push({ text: `${st.ahead ? `↑${st.ahead}` : ''}${st.behind ? ` ↓${st.behind}` : ''}`.trim() });
     if (wt.locked) meta.push({ text: 'locked' });
     if (wt.prunable) meta.push({ text: 'missing' });
@@ -1767,6 +1822,7 @@ function buildModel(deck, termId) {
         }),
       ),
     });
+    sections.push({ kind: 'notes', preview: notes && !notes.empty ? notes.preview : '' });
     sections.push({
       kind: 'prs',
       prs: prs.map((p) => {
@@ -2296,6 +2352,10 @@ function activate(ctx) {
    * @returns {Promise<{ error?: string }>}
    */
   const deleteWorktree = async (wt, { deleteBranch = false, allowForce = false } = {}) => {
+    try {
+      const kept = archiveNotes(wt);
+      if (kept) vscode.window.setStatusBarMessage(`Agent Deck: notes for ${wtLabel(wt)} kept in ${kept}`, 8000);
+    } catch {}
     deck.terminalsOf(wt.path).forEach((t) => t.dispose());
     const teardown = await runTeardown(wt.repo, wt.path);
     if (teardown.error) vscode.window.showWarningMessage(`Agent Deck: teardown for ${wtLabel(wt)} failed (${teardown.error}). Deleting the worktree anyway.`);
@@ -2734,6 +2794,7 @@ function activate(ctx) {
     vscode.workspace.registerTextDocumentContentProvider(GIT_SCHEME, new GitContent()),
 
     vscode.window.onDidChangeActiveTerminal(syncFromTerminal),
+    vscode.workspace.onDidSaveTextDocument((d) => d.uri.fsPath.endsWith(NOTES_REL) && panel.schedule()),
     vscode.window.onDidChangeActiveTextEditor((ed) => ed?.document.uri.scheme === 'file' && noteOpened(ed.document.uri.fsPath)),
     vscode.window.onDidOpenTerminal(() => {
       deck.adoptTerminals();
@@ -2816,6 +2877,21 @@ function activate(ctx) {
       applyRefresh(plan);
     }),
     vscode.commands.registerCommand('agentDeck.goToFileInWorktree', () => goToFile()),
+    vscode.commands.registerCommand('agentDeck.openNotes', async (arg) => {
+      const wt = resolveWt(arg);
+      if (!wt) return;
+      const file = path.join(wt.path, NOTES_REL);
+      if (!fs.existsSync(file)) {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        excludeAgentDeckDir(wt.path);
+        fs.writeFileSync(file, `# ${wtTitle(wt, deck)}\n\n`);
+      }
+      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+      const ed = await vscode.window.showTextDocument(doc, { preview: false });
+      const end = doc.lineAt(doc.lineCount - 1).range.end;
+      ed.selection = new vscode.Selection(end, end); // ready to paste
+      return file;
+    }),
     vscode.commands.registerCommand('agentDeck.openHome', () => openHome({ focus: true })),
     vscode.commands.registerCommand('agentDeck.sortByAttention', () =>
       vscode.workspace.getConfiguration('agentDeck').update('sortBy', 'attention', vscode.ConfigurationTarget.Global),
@@ -3183,7 +3259,7 @@ function activate(ctx) {
     await offerRefreshAfterReload();
   });
 
-  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh, goTo, focusByPid, files, home, openHome, closeOtherWorktreeTabs, readClipboardImage, appOfProcess, adoptExternal, pendingMoves, transientNotice, alertItem, ensureNotifier: () => ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')) };
+  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh, goTo, focusByPid, files, home, openHome, archiveNotes, closeOtherWorktreeTabs, readClipboardImage, appOfProcess, adoptExternal, pendingMoves, transientNotice, alertItem, ensureNotifier: () => ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')) };
 }
 
 function deactivate() {}

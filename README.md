@@ -18,6 +18,7 @@ Worktrees and terminals, linked, for running many coding agents at once in VS Co
 - **Home page** (🏠 on the Worktrees header; opens instead of the editor's welcome page, `agentDeck.homeOnStartup`): a big multi-line New Task composer (⏎ start, ⌥⏎ new line; repo, editable branch and base shown underneath; paste screenshots with ⌃V/⌘V, ⇧-drop or attach files — saved to the worktree's `.agent-deck/attachments/`, git-ignored, and handed to Claude) and every agent as a card, grouped Needs you / Working / Idle / Other. Click a card to jump to it.
 - **New Task** (✨ on the Worktrees header, `⌘⌥T`, or the home page): type what the agent should do. Agent Deck names a branch after it (following your repo's pattern, e.g. `anze/fix/flaky-login-redirect-test`), creates a worktree from the latest remote default branch, runs setup (your `.agent-deck/config.json` or `.superset/config.json` `setup` list, else copies ignored `.env*` files and runs `bun`/`pnpm`/`yarn`/`npm install`), and starts `claude` on the task in it. The launch goes through a small script in `.agent-deck/` (git-ignored) and the task text is saved there as `task-….md`, so prompts of any length arrive intact (typing a long line into a starting shell loses everything past ~1 KB). The card shows the task until Claude titles the session.
 - **Clean up:** a worktree whose branch's PR is merged or closed, that sits exactly on the PR's commit with no uncommitted changes and nothing running, shows "merged · clean up" with a delete button on its card. **Clean Up Finished Worktrees…** (`…` menu) lists all of them and removes the ones you keep ticked (teardown, terminals, folder; merged branches deleted, closed ones kept).
+- **Notes per worktree:** 📝 on a card, the Notes row in its dropdown, or `⌘⌥M` opens `<worktree>/.agent-deck/notes.md` (Markdown, git-ignored). Cards show a note marker and the first line. Deleting a worktree keeps a copy in `~/.agent-deck/notes-archive/`.
 - **Setup / teardown per repo:** `.agent-deck/config.json` (or Superset's `.superset/config.json`, same format) — `{ "setup": [...], "teardown": [...] }`. `setup` runs in every new worktree (New Task and `+`), `teardown` runs inside a worktree before it's deleted. Both see `$AGENT_DECK_ROOT_PATH` / `$SUPERSET_ROOT_PATH` = the main checkout.
 - `+` creates a branch + worktree (in `<repo>.worktrees/` next to the repo) and opens a terminal in it. Right-click to delete.
 
@@ -36,7 +37,7 @@ Worktrees and terminals, linked, for running many coding agents at once in VS Co
 
 ## Keys
 
-`⌘P` go to a file in the active worktree, recent files first (`>`, `@`, `#`, `:` hand over to the regular ⌘P; off: `agentDeck.scopeQuickOpen`) · `⌘⇧F` search only the active worktree (off: `agentDeck.scopeSearch`) · `⌘⌥T` new task · `⌘⌥N` go to the agent that needs you · `⌘⌥W` quick switch · `⌘⌥↓` / `⌘⌥↑` next / previous worktree
+`⌘P` go to a file in the active worktree, recent files first (`>`, `@`, `#`, `:` hand over to the regular ⌘P; off: `agentDeck.scopeQuickOpen`) · `⌘⇧F` search only the active worktree (off: `agentDeck.scopeSearch`) · `⌘⌥M` notes · `⌘⌥T` new task · `⌘⌥N` go to the agent that needs you · `⌘⌥W` quick switch · `⌘⌥↓` / `⌘⌥↑` next / previous worktree
 
 ## Develop
 

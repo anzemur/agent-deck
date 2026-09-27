@@ -9,7 +9,7 @@
     terminal: '\uea85', repo: '\uea62', 'git-pull-request': '\uea64', 'git-merge': '\ueafe',
     'git-pull-request-closed': '\uebda', bell: '\ueaa2', 'bell-dot': '\ueb9a', 'arrow-up': '\ueaa1',
     'diff': '\ueae1', 'play': '\ueb2c', 'debug-start': '\uead3', 'check': '\ueab2',
-    'file-media': '\ueaea', file: '\uea7b', close: '\uea76',
+    'file-media': '\ueaea', file: '\uea7b', close: '\uea76', note: '\ueb26',
   };
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
   const ci = (n, cls = '') => `<i class="ci ${cls}" aria-hidden="true">${CI[n] ?? ''}</i>`;

@@ -56,7 +56,7 @@ exports.run = async function () {
   // Tree structure: worktree -> [No changes, Terminals]; changes come first.
   {
     const secs = wtModel(a).sections;
-    assert.deepStrictEqual(secs.map((s) => s.kind), ['clean', 'terminals', 'prs']);
+    assert.deepStrictEqual(secs.map((s) => s.kind), ['clean', 'terminals', 'notes', 'prs']);
     assert.deepStrictEqual(secs[1].terminals.map((t) => t.name), ['feat-a']);
     console.log('✓ worktree dropdown = [No changes, Terminals (feat-a), Pull Requests]');
     // The webview really draws it: all worktrees as cards, the active one open.
@@ -143,7 +143,7 @@ exports.run = async function () {
   console.log('✓ feat-a: Staged = [staged.txt], Changes = [README.md, new.txt]; feat-b clean');
 
   const kids = wtModel(a).sections;
-  assert.deepStrictEqual(kids.map((k) => k.title ?? k.kind), ['Staged Changes', 'Changes', 'terminals', 'prs']);
+  assert.deepStrictEqual(kids.map((k) => k.title ?? k.kind), ['Staged Changes', 'Changes', 'terminals', 'notes', 'prs']);
   console.log('✓ feat-a dropdown = [Staged Changes, Changes, Terminals, Pull Requests] (changes on top)');
   const readme = kids[1].files.find((f) => f.path === 'README.md');
   // Seti gives README files their own (info) icon and other .md files the markdown one.
@@ -204,7 +204,7 @@ exports.run = async function () {
     console.log(`✓ worktree feat-b labelled "${item.title}" (branch ${item.branch})`);
     await until(async () => (deck.prs.get(b.path) ?? []).some((p) => p.number === 42), 'PR from session', 15000);
     const secsB = wtModel(b).sections;
-    assert.deepStrictEqual(secsB.slice(-2).map((s) => s.kind), ['terminals', 'prs']);
+    assert.deepStrictEqual(secsB.slice(-3).map((s) => s.kind), ['terminals', 'notes', 'prs']);
     const pr = secsB.at(-1).prs[0];
     assert.strictEqual(pr.number, 42);
     assert.match(pr.sub, /from session/);
@@ -787,6 +787,29 @@ exports.run = async function () {
     assert.strictEqual(fsx.readFileSync(path.join(made, '.agent-deck', saved[0]), 'utf8'), prompt);
     assert.ok(!cpx.execSync('git status --porcelain', { cwd: made }).toString().includes('.agent-deck'), 'git-ignored');
     console.log(`✓ a ${prompt.length}-char prompt with quotes/newlines/$/backticks reaches claude intact and is saved in .agent-deck/`);
+  }
+
+  // Notes: one Markdown file per worktree, opened from the card, previewed, git-ignored, archived
+  // before the worktree is deleted.
+  {
+    const fsx = require('fs');
+    const cpx = require('child_process');
+    const file = await vscode.commands.executeCommand('agentDeck.openNotes', { wtPath: b.path });
+    assert.strictEqual(file, path.join(b.path, '.agent-deck', 'notes.md'));
+    assert.match(fsx.readFileSync(file, 'utf8'), /^# .+\n\n$/);
+    assert.ok(vscode.window.activeTextEditor?.document.uri.fsPath === file, 'opened in the editor');
+    let sec = wtModel(b).sections.find((x) => x.kind === 'notes');
+    assert.strictEqual(sec.preview, '');
+    fsx.appendFileSync(file, 'Ask Jan about the grading rubric before merging.\n- second point\n');
+    await deck.poll();
+    sec = wtModel(b).sections.find((x) => x.kind === 'notes');
+    assert.strictEqual(sec.preview, 'Ask Jan about the grading rubric before merging.');
+    assert.ok(wtModel(b).meta.some((m) => m.icon === 'note'));
+    assert.ok(!cpx.execSync('git status --porcelain', { cwd: b.path }).toString().includes('.agent-deck'), 'notes are git-ignored');
+    const kept = ext.exports.archiveNotes(deck.findWorktree(b.path));
+    assert.ok(kept.startsWith(process.env.AGENT_DECK_NOTES_ARCHIVE) && fsx.readFileSync(kept, 'utf8').includes('grading rubric'));
+    console.log(`✓ notes: .agent-deck/notes.md per worktree, preview "${sec.preview.slice(0, 30)}…" on the card, git-ignored, archived as ${path.basename(kept)}`);
+    await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
   }
   console.log('ALL PASSED');
 };
