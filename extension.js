@@ -1686,6 +1686,7 @@ class Deck {
       iconPath: new vscode.ThemeIcon(wt.isMain ? 'repo' : 'git-branch'),
       color: new vscode.ThemeColor(this.colorOf(wt.path)),
       env: { ...env, [ENV_KEY]: wt.path },
+      // 'spotlight' also starts in the panel; the spotlight moves the active worktree's one over.
       location:
         cfg.get('terminalLocation') === 'editor'
           ? beside
@@ -2124,6 +2125,9 @@ class HomePage {
 function activate(ctx) {
   const deck = new Deck(ctx);
   const panel = new PanelProvider(ctx, deck);
+  /** Until when terminal focus changes come from the spotlight moving terminals, not the user switching worktrees. */
+  let spotlightQuietUntil = 0;
+  const spotlightMoving = () => Date.now() < spotlightQuietUntil;
   /** Terminals that already existed when this window (re)loaded. */
   const restoredTerminals = new Set(vscode.window.terminals);
 
@@ -2540,8 +2544,12 @@ function activate(ctx) {
 
   // ---- terminals as editor tabs --------------------------------------------------------------
 
-  const editorMode = () => vscode.workspace.getConfiguration('agentDeck').get('terminalLocation') === 'editor';
-  const syncEditorModeContext = () => vscode.commands.executeCommand('setContext', 'agentDeck.terminalsInEditor', editorMode());
+  const terminalMode = () => vscode.workspace.getConfiguration('agentDeck').get('terminalLocation');
+  const editorMode = () => terminalMode() === 'editor';
+  const spotlightMode = () => terminalMode() === 'spotlight';
+  // ⌘J toggles agent ↔ code whenever the agent lives in the editor area (all tabs, or spotlight).
+  const syncEditorModeContext = () =>
+    vscode.commands.executeCommand('setContext', 'agentDeck.terminalsInEditor', editorMode() || spotlightMode());
   syncEditorModeContext();
 
   /** The last text editor tab you were in (⌘J goes back to it from the agent's tab). */
@@ -2567,11 +2575,78 @@ function activate(ctx) {
     }
     const wt = deck.active ? deck.findWorktree(deck.active) : undefined;
     if (!wt) return;
-    const terms = deck.terminalsOf(wt.path);
-    const last = deck.lastTerminal.get(wt.path);
-    const t = last && terms.includes(last) ? last : terms.find((x) => deck.procs.get(x)?.agent) ?? terms[0];
-    if (t) t.show(false);
-    else deck.createTerminal(wt);
+    const t = agentTerminalOf(wt.path);
+    if (!t) return deck.createTerminal(wt);
+    if (spotlightMode() && t !== spotlit) return spotlight(t);
+    t.show(false);
+  };
+
+  // ---- spotlight: one agent tab, the active worktree's; everything else in the panel ------------
+
+  /** @type {vscode.Terminal | undefined} the terminal currently shown as the editor tab */
+  let spotlit;
+  let spotlightBusy = Promise.resolve();
+
+  /** Which terminal represents a worktree: its last focused one, else its agent, else the first. */
+  const agentTerminalOf = (wtPath) => {
+    const terms = deck.terminalsOf(wtPath);
+    const last = deck.lastTerminal.get(wtPath);
+    return last && terms.includes(last) ? last : terms.find((x) => deck.procs.get(x)?.agent) ?? terms[0];
+  };
+
+  /** Show a terminal unless it has gone away meanwhile (closed terminals linger in the list briefly). */
+  const safeShow = (t, preserveFocus) => {
+    if (!t || t.exitStatus !== undefined || !vscode.window.terminals.includes(t)) return false;
+    try {
+      t.show(preserveFocus);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  /**
+   * Make `t` the terminal the move commands act on: show it and wait until the editor reports it
+   * as active (showing is asynchronous; a fixed delay sometimes moved the previous one instead).
+   */
+  const activate = async (t, preserveFocus = false) => {
+    if (!safeShow(t, preserveFocus)) return false;
+    for (let i = 0; i < 30 && vscode.window.activeTerminal !== t; i++) await new Promise((r) => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, 40));
+    return vscode.window.activeTerminal === t;
+  };
+
+  /** Put `t` in the spotlight tab (moving the previous one back to the panel). Serialized. */
+  const spotlight = (t) =>
+    (spotlightBusy = spotlightBusy
+      .then(async () => {
+        if (!spotlightMode() || !t || t === spotlit || t.exitStatus) return;
+        const prev = spotlit;
+        // Showing terminals below fires focus events; keep them from being read as worktree switches.
+        spotlightQuietUntil = Infinity;
+        try {
+          if (prev && (await activate(prev, true))) {
+            await vscode.commands.executeCommand('workbench.action.terminal.moveToTerminalPanel').then(undefined, () => {});
+            spotlit = undefined;
+          }
+          if (!(await activate(t))) return;
+          await vscode.commands.executeCommand('workbench.action.terminal.moveToEditor').then(undefined, () => {});
+          spotlit = t;
+          safeShow(t, false);
+        } finally {
+          spotlightQuietUntil = Date.now() + 400;
+        }
+      })
+      .catch(() => {}));
+
+  deck.onActive((p) => {
+    if (p && spotlightMode()) spotlight(agentTerminalOf(p));
+  });
+  // Clicking another terminal of the same worktree (panel or card) spotlights that one instead.
+  const spotlightFollow = (t) => {
+    if (!spotlightMode() || !t || t === spotlit || spotlightMoving()) return;
+    const wt = deck.worktreeOf(t);
+    if (wt && wt.path === deck.active) spotlight(t);
   };
 
   /** Move terminals that live in the bottom panel into editor tabs (processes keep running). */
@@ -2580,12 +2655,11 @@ function activate(ctx) {
     const before = termTabs();
     const active = vscode.window.activeTerminal;
     for (const t of [...vscode.window.terminals]) {
-      t.show(false);
-      await new Promise((r) => setTimeout(r, 120));
+      if (!(await activate(t))) continue;
       // Moves the focused panel terminal; does nothing for one that's already an editor tab.
       await vscode.commands.executeCommand('workbench.action.terminal.moveToEditor').then(undefined, () => {});
     }
-    active?.show(false);
+    safeShow(active, false);
     return termTabs() - before;
   };
 
@@ -2595,12 +2669,11 @@ function activate(ctx) {
     const before = termTabs();
     const active = vscode.window.activeTerminal;
     for (const t of [...vscode.window.terminals]) {
-      t.show(false);
-      await new Promise((r) => setTimeout(r, 120));
+      if (!(await activate(t))) continue;
       // Moves the focused editor-tab terminal; does nothing for one already in the panel.
       await vscode.commands.executeCommand('workbench.action.terminal.moveToTerminalPanel').then(undefined, () => {});
     }
-    active?.show(false);
+    safeShow(active, false);
     return before - termTabs();
   };
 
@@ -2688,7 +2761,7 @@ function activate(ctx) {
 
   /** Reflect the active terminal's worktree in the panel without stealing focus. */
   const syncFromTerminal = (t) => {
-    if (!t) return;
+    if (!t || spotlightMoving()) return;
     if (vscode.window.state.focused) deck.markSeen(t);
     const wt = deck.worktreeOf(t);
     if (!wt) return;
@@ -2795,6 +2868,17 @@ function activate(ctx) {
     vscode.workspace.registerTextDocumentContentProvider(GIT_SCHEME, new GitContent()),
 
     vscode.window.onDidChangeActiveTerminal(syncFromTerminal),
+    vscode.window.onDidChangeActiveTerminal(spotlightFollow),
+    vscode.window.onDidCloseTerminal((t) => {
+      if (t === spotlit) spotlit = undefined;
+    }),
+    vscode.window.onDidOpenTerminal((t) => {
+      // A new terminal for the active worktree (e.g. New Task) goes straight into the spotlight.
+      setTimeout(() => {
+        const wt = deck.worktreeOf(t);
+        if (spotlightMode() && wt && wt.path === deck.active && !spotlit) spotlight(t);
+      }, 400);
+    }),
     vscode.window.onDidChangeActiveTextEditor(() => {
       panel.schedule(); // highlight the open file in the Changes list
     }),
@@ -2892,6 +2976,17 @@ function activate(ctx) {
     vscode.workspace.onDidChangeConfiguration(async (e) => {
       if (!e.affectsConfiguration('agentDeck.terminalLocation')) return;
       syncEditorModeContext();
+      if (spotlightMode()) {
+        const t = deck.active && agentTerminalOf(deck.active);
+        if (t) spotlight(t);
+        return;
+      }
+      if (spotlit && !editorMode()) {
+        const prev = spotlit;
+        spotlit = undefined;
+        await spotlightBusy;
+        if (await activate(prev, true)) await vscode.commands.executeCommand('workbench.action.terminal.moveToTerminalPanel').then(undefined, () => {});
+      }
       if (!editorMode() || !vscode.window.terminals.length) return;
       const n = vscode.window.terminals.length;
       const c = await vscode.window.showInformationMessage(
@@ -3294,7 +3389,7 @@ function activate(ctx) {
     await offerRefreshAfterReload();
   });
 
-  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh, goTo, focusByPid, home, openHome, toggleAgent, archiveNotes, closeOtherWorktreeTabs, readClipboardImage, appOfProcess, adoptExternal, pendingMoves, transientNotice, alertItem, ensureNotifier: () => ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')) };
+  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh, goTo, focusByPid, home, openHome, toggleAgent, spotlightState: () => ({ spotlit, busy: spotlightBusy }), archiveNotes, closeOtherWorktreeTabs, readClipboardImage, appOfProcess, adoptExternal, pendingMoves, transientNotice, alertItem, ensureNotifier: () => ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')) };
 }
 
 function deactivate() {}

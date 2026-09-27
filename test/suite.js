@@ -11,7 +11,7 @@ async function until(fn, what, ms = 8000) {
     await globalDeck?.poll();
     await sleep(100);
   }
-  throw new Error(`timed out waiting for ${what}`);
+  throw new Error(`timed out waiting for ${typeof what === 'function' ? what() : what}`);
 }
 
 let globalDeck;
@@ -891,6 +891,38 @@ exports.run = async function () {
     console.log(`✓ moved all ${back} terminal tabs back into the panel, still running`);
     await cfg.update('terminalLocation', undefined, vscode.ConfigurationTarget.Global);
     panelTerm.dispose();
+  }
+
+  // Spotlight: exactly one terminal tab, the active worktree's; it swaps on switch; others stay in
+  // the panel and keep running; leaving the mode puts it back.
+  {
+    const cfg = vscode.workspace.getConfiguration('agentDeck');
+    const termTabs = () => vscode.window.tabGroups.all.flatMap((g) => g.tabs).filter((x) => x.input instanceof vscode.TabInputTerminal);
+    await vscode.commands.executeCommand('agentDeck.moveTerminalsToPanel');
+    await until(() => termTabs().length === 0, 'start with no terminal tabs');
+    const ta = deck.createTerminal(deck.findWorktree(a.path), { plain: true, name: 'spot-a', show: false });
+    const tb = deck.createTerminal(deck.findWorktree(b.path), { plain: true, name: 'spot-b', show: false });
+    await sleep(800);
+    deck.lastTerminal.set(a.path, ta);
+    deck.lastTerminal.set(b.path, tb);
+    deck.setActive(b.path);
+    await cfg.update('terminalLocation', 'spotlight', vscode.ConfigurationTarget.Global);
+    deck.switchTo(a.path);
+    await until(() => ext.exports.spotlightState().spotlit === ta && termTabs().length === 1, 'a spotlit, one tab', 8000);
+    await ext.exports.spotlightState().busy;
+    assert.strictEqual(termTabs()[0].label, 'spot-a');
+    console.log('✓ spotlight: switching to feat-a shows its agent as the single terminal tab');
+    deck.switchTo(b.path);
+    await until(() => ext.exports.spotlightState().spotlit === tb, () => `b spotlit (spotlit=${ext.exports.spotlightState().spotlit?.name}, active=${deck.active})`, 8000);
+    await ext.exports.spotlightState().busy;
+    await until(() => termTabs().length === 1 && termTabs()[0].label === 'spot-b', 'swapped to b, still one tab', 8000);
+    assert.ok(ta.exitStatus === undefined && vscode.window.terminals.includes(ta), 'feat-a terminal back in the panel, running');
+    console.log('✓ switching to feat-b swaps the tab to its agent; feat-a goes back to the panel, still running');
+    await cfg.update('terminalLocation', undefined, vscode.ConfigurationTarget.Global);
+    await until(() => termTabs().length === 0, 'leaving spotlight returns the tab to the panel', 8000);
+    console.log('✓ leaving spotlight mode puts the agent back into the panel');
+    ta.dispose();
+    tb.dispose();
   }
   console.log('ALL PASSED');
 };

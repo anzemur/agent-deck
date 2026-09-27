@@ -538,10 +538,16 @@
           "type": "string",
           "enum": [
             "panel",
+            "spotlight",
             "editor"
           ],
           "default": "panel",
-          "description": "Where worktree terminals open. 'editor' gives each agent a full-size tab next to your code; \u2318J then toggles between the active worktree's agent and the file you were in, and \u2318\u2325\\ opens a plain shell beside it."
+          "description": "Where worktree terminals open. 'editor' gives each agent a full-size tab next to your code; \u2318J then toggles between the active worktree's agent and the file you were in, and \u2318\u2325\\ opens a plain shell beside it.",
+          "enumDescriptions": [
+            "All terminals in the bottom panel.",
+            "One editor tab showing the active worktree's agent; it swaps when you switch worktrees, everything else stays in the panel. \u2318J toggles agent \u2194 code.",
+            "Every terminal as its own editor tab. \u2318J toggles agent \u2194 code."
+          ]
         },
         "agentDeck.worktreeParentDir": {
           "type": "string",
