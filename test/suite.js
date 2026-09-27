@@ -458,7 +458,10 @@ exports.run = async function () {
     await deck.refresh();
     const head = (p) => cpx.execSync('git rev-parse HEAD', { cwd: p }).toString().trim();
     const base = cpx.execSync('git rev-parse HEAD~1', { cwd: pAhead }).toString().trim();
-    deck.refreshPrs = async () => {}; // no GitHub here: feed PR states directly
+    // No GitHub here: feed PR states directly. Let a lookup that's already running finish first,
+    // or it lands after us and overwrites the injected PRs.
+    while (deck.prsLoading) await sleep(50);
+    deck.refreshPrs = async () => {};
     deck.prs.set(pDone, [{ number: 7, url: 'u7', title: 'x', state: 'MERGED', isDraft: false, own: true, headRefOid: head(pDone) }]);
     deck.prs.set(pDirty, [{ number: 8, url: 'u8', title: 'y', state: 'MERGED', isDraft: false, own: true, headRefOid: head(pDirty) }]);
     deck.prs.set(pAhead, [{ number: 9, url: 'u9', title: 'z', state: 'MERGED', isDraft: false, own: true, headRefOid: base }]);
@@ -750,6 +753,21 @@ exports.run = async function () {
     assert.ok(deck.statusAt.get(a.path) > activeBefore, 'active worktree re-read every time');
     assert.ok(deck.status.has(other.path), 'other worktree keeps its last status');
     console.log('✓ background poll: active worktree read every tick, others skipped while fresh (kept, not dropped)');
+  }
+
+  // Poll queue: a full refresh asked for while a single-worktree refresh is queued must not be
+  // downgraded to that single-worktree refresh.
+  {
+    const fsx = require('fs');
+    const other = deck.worktrees.find((w) => w.path !== a.path);
+    const blocker = deck.poll(); // occupies the queue
+    deck.poll(false, { only: a.path }); // queued: just worktree a
+    fsx.writeFileSync(path.join(other.path, 'queue-check.txt'), 'q\n'); // a change elsewhere
+    await deck.poll(); // must see it
+    await blocker;
+    assert.ok(deck.changesOf(other.path, 'unstaged').some((c) => c.path === 'queue-check.txt'), 'full refresh was not downgraded');
+    fsx.rmSync(path.join(other.path, 'queue-check.txt'));
+    console.log('✓ poll queue: a full refresh requested behind a single-worktree one still reads every worktree');
   }
   console.log('ALL PASSED');
 };

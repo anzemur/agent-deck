@@ -1083,9 +1083,24 @@ class Deck {
     // One poll at a time; a request during a poll gets a fresh one right after it, so callers
     // always see state read after they asked.
     if (this.pollRun) {
+      // Requests made while a poll runs are merged into one follow-up that does at least what
+      // each of them asked: any full request makes it full, any foreground one makes it not
+      // light/background, two different single-worktree requests become a full one.
+      const want = { silent, light, background, only };
+      const q = this.pollNextOpts;
+      this.pollNextOpts = q
+        ? {
+            silent: q.silent && silent,
+            light: q.light && light,
+            background: q.background && background,
+            only: q.only && q.only === only ? only : undefined,
+          }
+        : want;
       this.pollNext ??= this.pollRun.then(() => {
+        const o = this.pollNextOpts;
         this.pollNext = undefined;
-        return this.poll(silent, { light, background, only });
+        this.pollNextOpts = undefined;
+        return this.poll(o.silent, { light: o.light, background: o.background, only: o.only });
       });
       return this.pollNext;
     }
