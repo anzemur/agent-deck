@@ -1076,18 +1076,20 @@ class Deck {
    * `background`: the 4-second timer: git status for the active worktree every time, for the
    * others only when they're 16 s stale, one at a time. Everything else (explicit polls after an
    * action, refresh, tests) reads all worktrees.
+   * `only`: after a git action on one worktree, re-read just that worktree's status and nothing
+   * else (no process scan, no other worktrees), so the panel reflects the click right away.
    */
-  poll(silent = false, { light = false, background = false } = {}) {
+  poll(silent = false, { light = false, background = false, only = undefined } = {}) {
     // One poll at a time; a request during a poll gets a fresh one right after it, so callers
     // always see state read after they asked.
     if (this.pollRun) {
       this.pollNext ??= this.pollRun.then(() => {
         this.pollNext = undefined;
-        return this.poll(silent, { light, background });
+        return this.poll(silent, { light, background, only });
       });
       return this.pollNext;
     }
-    this.pollRun = this._poll(silent, light, background).finally(() => (this.pollRun = undefined));
+    this.pollRun = (only ? this._pollOne(only, silent) : this._poll(silent, light, background)).finally(() => (this.pollRun = undefined));
     return this.pollRun;
   }
 
@@ -1101,6 +1103,20 @@ class Deck {
       this.statusAt.set(w.path, Date.now());
     }
     return out;
+  }
+
+  /** git status for one worktree only; everything else keeps its last value. */
+  async _pollOne(wtPath, silent) {
+    if (!this.worktrees.some((w) => w.path === wtPath)) return;
+    const st = await readStatus(wtPath);
+    this.statusAt.set(wtPath, Date.now());
+    const before = JSON.stringify(this.status.get(wtPath));
+    if (st) this.status.set(wtPath, st);
+    else this.status.delete(wtPath);
+    if (!silent && JSON.stringify(this.status.get(wtPath)) !== before) {
+      this.lastPollSig = undefined; // next full poll re-signs from scratch
+      this._onChange.fire();
+    }
   }
 
   async _poll(silent, light, background) {
@@ -2644,7 +2660,7 @@ function activate(ctx) {
     } catch (e) {
       vscode.window.showErrorMessage(`Agent Deck: ${e.message}`);
     }
-    deck.poll();
+    deck.poll(false, { only: wt.path });
   };
 
   const cycle = (dir) => {

@@ -154,8 +154,10 @@ exports.run = async function () {
 
   // Stage README via the command, then check the index diff content provider.
   const readmeNode = { wtPath: a.path, group: 'unstaged', path: 'README.md' };
+  const t0 = Date.now();
   await vscode.commands.executeCommand('agentDeck.stage', readmeNode);
   await until(() => deck.changesOf(a.path, 'staged').some((c) => c.path === 'README.md'), 'README staged');
+  console.log(`  (stage → panel state: ${Date.now() - t0} ms)`);
   const idx = await vscode.workspace.openTextDocument(vscode.Uri.from({ scheme: 'agentdeck-git', path: path.join(a.path, 'README.md'), query: JSON.stringify({ cwd: a.path, ref: ':' }) }));
   const head = await vscode.workspace.openTextDocument(vscode.Uri.from({ scheme: 'agentdeck-git', path: path.join(a.path, 'README.md'), query: JSON.stringify({ cwd: a.path, ref: 'HEAD' }) }));
   assert.strictEqual(idx.getText(), 'changed\n');
