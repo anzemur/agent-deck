@@ -769,5 +769,24 @@ exports.run = async function () {
     fsx.rmSync(path.join(other.path, 'queue-check.txt'));
     console.log('✓ poll queue: a full refresh requested behind a single-worktree one still reads every worktree');
   }
+
+  // Long prompts: the full text (quotes, newlines, $vars, backticks, 6 kB) reaches the agent, the
+  // terminal only gets a short line, and the prompt is saved in the worktree.
+  {
+    const fsx = require('fs');
+    const cpx = require('child_process');
+    const body = Array.from({ length: 90 }, (_, i) => `Line ${i}: don't break on 'quotes', "double", $HOME, \`ticks\` & (parens) — ok.`).join('\n');
+    const prompt = `LONGTASK start\n${body}\nLONGTASK-END`;
+    assert.ok(prompt.length > 5000);
+    const made = await vscode.commands.executeCommand('agentDeck.newTask', { prompt, wtPath: main.path });
+    let pid;
+    await until(() => (pid = cpx.spawnSync('pgrep', ['-f', 'LONGTASK start']).stdout.toString().trim().split('\n')[0]), 'agent started', 20000);
+    const args = cpx.execFileSync('ps', ['-ww', '-o', 'args=', '-p', pid]).toString();
+    assert.ok(args.includes('LONGTASK-END') && args.includes(`don't break on 'quotes'`) && args.includes('$HOME') && args.includes('`ticks`'), 'full prompt, unexpanded');
+    const saved = fsx.readdirSync(path.join(made, '.agent-deck')).filter((f) => f.startsWith('task-'));
+    assert.strictEqual(fsx.readFileSync(path.join(made, '.agent-deck', saved[0]), 'utf8'), prompt);
+    assert.ok(!cpx.execSync('git status --porcelain', { cwd: made }).toString().includes('.agent-deck'), 'git-ignored');
+    console.log(`✓ a ${prompt.length}-char prompt with quotes/newlines/$/backticks reaches claude intact and is saved in .agent-deck/`);
+  }
   console.log('ALL PASSED');
 };

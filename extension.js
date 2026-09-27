@@ -859,6 +859,49 @@ function runTeardown(repo, wtPath) {
   });
 }
 
+/** Keep <worktree>/.agent-deck/ out of git, via the repo's local info/exclude (never a tracked file). */
+function excludeAgentDeckDir(wtPath) {
+  try {
+    const exclude = String(require('child_process').execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-path', 'info/exclude'], { cwd: wtPath })).trim();
+    const has = fs.existsSync(exclude) && fs.readFileSync(exclude, 'utf8').split('\n').includes('.agent-deck/');
+    if (!has) {
+      fs.mkdirSync(path.dirname(exclude), { recursive: true });
+      fs.appendFileSync(exclude, '\n# Agent Deck (task prompts, launch scripts, attachments)\n.agent-deck/\n');
+    }
+  } catch {}
+}
+
+/**
+ * Writes the launch into <worktree>/.agent-deck/start-<stamp>.sh (and the task text next to it)
+ * and returns the short line to type into the terminal.
+ *
+ * Typing the whole thing into a shell that is still starting is not safe: macOS accepts about
+ * 1024 bytes per line in that state and silently drops the rest, closing quote included, so the
+ * shell hangs at `quote>` and the prompt is lost. A short `. script` line always fits; the prompt
+ * reaches the agent intact via "$(cat file)", and stays saved in the worktree.
+ * @param {{ setup: string[], agent?: string, task?: string }} launch
+ */
+function writeLaunchScript(wtPath, { setup, agent, task }) {
+  const dir = path.join(wtPath, '.agent-deck');
+  fs.mkdirSync(dir, { recursive: true });
+  excludeAgentDeckDir(wtPath);
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..*/, '').replace('T', '-');
+  const lines = ['# Agent Deck: set up this worktree, then start the agent.', `cd ${sq(wtPath)} || return`];
+  // Setup failures shouldn't stop the agent: it can often fix them itself.
+  if (setup.length) lines.push(`{ ${setup.join(' && ')}; }`);
+  if (agent && task !== undefined) {
+    const taskFile = path.join(dir, `task-${stamp}.md`);
+    fs.writeFileSync(taskFile, task);
+    // `--` only when the task itself starts with a dash, so it isn't read as an option.
+    lines.push(`${agent}${task.startsWith('-') ? ' --' : ''} "$(cat ${sq(taskFile)})"`);
+  } else if (agent) {
+    lines.push(agent);
+  }
+  const script = path.join(dir, `start-${stamp}.sh`);
+  fs.writeFileSync(script, lines.join('\n') + '\n');
+  return `. ${sq(script)}`;
+}
+
 /**
  * Writes pasted/dropped files into <worktree>/.agent-deck/attachments/ and keeps that folder out of
  * git (via the repo's local info/exclude, never a tracked .gitignore). Returns worktree-relative paths.
@@ -868,14 +911,7 @@ function saveAttachments(wtPath, files) {
   if (!files.length) return [];
   const dir = path.join(wtPath, '.agent-deck', 'attachments');
   fs.mkdirSync(dir, { recursive: true });
-  try {
-    const exclude = String(require('child_process').execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-path', 'info/exclude'], { cwd: wtPath })).trim();
-    const has = fs.existsSync(exclude) && fs.readFileSync(exclude, 'utf8').split('\n').includes('.agent-deck/');
-    if (!has) {
-      fs.mkdirSync(path.dirname(exclude), { recursive: true });
-      fs.appendFileSync(exclude, '\n# Agent Deck task attachments\n.agent-deck/\n');
-    }
-  } catch {}
+  excludeAgentDeckDir(wtPath);
   const out = [];
   for (const f of files) {
     const safe = path.basename(String(f.name || 'file')).replace(/[^\w.\-]+/g, '-').replace(/^-+/, '') || 'file';
@@ -2926,9 +2962,9 @@ function activate(ctx) {
       // Same setup as New Task, then the usual first-terminal command (claude by default).
       const { commands } = await setupFor(repo);
       const startup = /** @type {string} */ (vscode.workspace.getConfiguration('agentDeck').get('startupCommand') ?? '').trim();
-      const setup = commands.length ? `{ ${commands.join(' && ')}; }` : '';
       deck.setActive(wt.path);
-      deck.createTerminal(wt, { command: [setup, startup].filter(Boolean).join(' ; ') || undefined, plain: true, env: scriptEnv(repo) });
+      const launch = commands.length || startup ? writeLaunchScript(wt.path, { setup: commands, agent: startup || undefined }) : undefined;
+      deck.createTerminal(wt, { command: launch, plain: true, env: scriptEnv(repo) });
       return wt.path;
     }),
 
@@ -2974,11 +3010,9 @@ function activate(ctx) {
       const cfg = vscode.workspace.getConfiguration('agentDeck');
       const startup = /** @type {string} */ (cfg.get('startupCommand') ?? '').trim();
       const agent = startup.startsWith('claude') || startup.includes('/claude') ? startup : 'claude';
-      // Setup failures shouldn't stop the agent: it can often fix them itself.
-      const setup = commands.length ? `{ ${commands.join(' && ')}; } ; ` : '';
       deck.setActive(wt.path);
       deck.createTerminal(wt, {
-        command: `${setup}${agent} ${sq(fullTask)}`,
+        command: writeLaunchScript(wt.path, { setup: commands, agent, task: fullTask }),
         plain: true,
         env: scriptEnv(repo),
       });
