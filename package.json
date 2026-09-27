@@ -262,6 +262,11 @@
         "title": "Open Shell Beside the Agent",
         "icon": "$(split-horizontal)",
         "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.moveTerminalsToPanel",
+        "title": "Move All Terminals Back to the Panel",
+        "category": "Agent Deck"
       }
     ],
     "menus": {

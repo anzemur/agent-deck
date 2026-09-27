@@ -2589,6 +2589,21 @@ function activate(ctx) {
     return termTabs() - before;
   };
 
+  /** The reverse: every terminal that's an editor tab goes back into the bottom panel. */
+  const moveTerminalsToPanel = async () => {
+    const termTabs = () => vscode.window.tabGroups.all.flatMap((g) => g.tabs).filter(isTerminalTab).length;
+    const before = termTabs();
+    const active = vscode.window.activeTerminal;
+    for (const t of [...vscode.window.terminals]) {
+      t.show(false);
+      await new Promise((r) => setTimeout(r, 120));
+      // Moves the focused editor-tab terminal; does nothing for one already in the panel.
+      await vscode.commands.executeCommand('workbench.action.terminal.moveToTerminalPanel').then(undefined, () => {});
+    }
+    active?.show(false);
+    return before - termTabs();
+  };
+
   /** Jump to a terminal that needs you: its worktree becomes active and the terminal is focused. */
   const goTo = (t) => {
     const wt = deck.worktreeOf(t);
@@ -2863,6 +2878,7 @@ function activate(ctx) {
     vscode.commands.registerCommand('agentDeck.goToFileInWorktree', () => goToFile()),
     vscode.commands.registerCommand('agentDeck.toggleAgent', () => toggleAgent()),
     vscode.commands.registerCommand('agentDeck.moveTerminalsToEditor', () => moveTerminalsToEditor()),
+    vscode.commands.registerCommand('agentDeck.moveTerminalsToPanel', () => moveTerminalsToPanel()),
     vscode.commands.registerCommand('agentDeck.shellBeside', (arg) => {
       const wt = resolveWt(arg);
       if (!wt) return;

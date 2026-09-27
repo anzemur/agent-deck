@@ -885,6 +885,10 @@ exports.run = async function () {
     await until(() => termTabs().some((x) => x.label === 'was-in-panel'), 'panel terminal now a tab');
     assert.strictEqual(panelTerm.exitStatus, undefined, 'still running');
     console.log(`✓ moved ${n} panel terminal(s) into editor tabs, still running`);
+    const back = await vscode.commands.executeCommand('agentDeck.moveTerminalsToPanel');
+    await until(() => termTabs().length === 0, 'all terminal tabs back in the panel');
+    assert.ok(back >= n && panelTerm.exitStatus === undefined);
+    console.log(`✓ moved all ${back} terminal tabs back into the panel, still running`);
     await cfg.update('terminalLocation', undefined, vscode.ConfigurationTarget.Global);
     panelTerm.dispose();
   }
