@@ -246,6 +246,22 @@
         "title": "Open Worktree Notes",
         "icon": "$(note)",
         "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.toggleAgent",
+        "title": "Toggle Agent Terminal \u2194 Code",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.moveTerminalsToEditor",
+        "title": "Move Terminals to Editor Tabs",
+        "category": "Agent Deck"
+      },
+      {
+        "command": "agentDeck.shellBeside",
+        "title": "Open Shell Beside the Agent",
+        "icon": "$(split-horizontal)",
+        "category": "Agent Deck"
       }
     ],
     "menus": {
@@ -497,6 +513,17 @@
         "command": "agentDeck.openNotes",
         "key": "cmd+alt+m",
         "mac": "cmd+alt+m"
+      },
+      {
+        "command": "agentDeck.toggleAgent",
+        "key": "cmd+j",
+        "mac": "cmd+j",
+        "when": "agentDeck.terminalsInEditor"
+      },
+      {
+        "command": "agentDeck.shellBeside",
+        "key": "cmd+alt+\\",
+        "mac": "cmd+alt+\\"
       }
     ],
     "configuration": {
@@ -509,7 +536,7 @@
             "editor"
           ],
           "default": "panel",
-          "description": "Where new worktree terminals open. 'editor' gives each agent a full-size tab."
+          "description": "Where worktree terminals open. 'editor' gives each agent a full-size tab next to your code; \u2318J then toggles between the active worktree's agent and the file you were in, and \u2318\u2325\\ opens a plain shell beside it."
         },
         "agentDeck.worktreeParentDir": {
           "type": "string",

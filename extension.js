@@ -1131,18 +1131,20 @@ class Deck {
 
   // ------------------------------------------------------------ discovery
 
+  /**
+   * Re-reads repos and worktrees. A call made while a refresh is running gets a fresh one that
+   * starts after it (shared by everyone who asked meanwhile), never the one already in flight,
+   * which may predate what the caller just changed (e.g. a worktree it just created).
+   */
   refresh() {
     if (this.refreshing) {
-      this.pendingRefresh = true;
-      return this.refreshing;
+      this.refreshNext ??= this.refreshing.then(() => {
+        this.refreshNext = undefined;
+        return this.refresh();
+      });
+      return this.refreshNext;
     }
-    this.refreshing = this._refresh().finally(() => {
-      this.refreshing = undefined;
-      if (this.pendingRefresh) {
-        this.pendingRefresh = false;
-        this.refresh();
-      }
-    });
+    this.refreshing = this._refresh().finally(() => (this.refreshing = undefined));
     return this.refreshing;
   }
 
@@ -1669,7 +1671,8 @@ class Deck {
 
   /** @param {Worktree} wt */
   /** `command` replaces the startup command; `cwd` overrides where the shell starts. */
-  createTerminal(wt, { show = true, preserveFocus = false, name: wanted = undefined, command = undefined, cwd = undefined, plain = false, env = {} } = {}) {
+  /** `beside`: in editor-tab mode, open to the right of the current editor (the "shell beside" split). */
+  createTerminal(wt, { show = true, preserveFocus = false, name: wanted = undefined, command = undefined, cwd = undefined, plain = false, env = {}, beside = false } = {}) {
     const cfg = vscode.workspace.getConfiguration('agentDeck');
     const base = wanted ?? wtLabel(wt);
     const existing = this.terminalsOf(wt.path);
@@ -1683,7 +1686,12 @@ class Deck {
       iconPath: new vscode.ThemeIcon(wt.isMain ? 'repo' : 'git-branch'),
       color: new vscode.ThemeColor(this.colorOf(wt.path)),
       env: { ...env, [ENV_KEY]: wt.path },
-      location: cfg.get('terminalLocation') === 'editor' ? vscode.TerminalLocation.Editor : vscode.TerminalLocation.Panel,
+      location:
+        cfg.get('terminalLocation') === 'editor'
+          ? beside
+            ? { viewColumn: vscode.ViewColumn.Beside, preserveFocus }
+            : vscode.TerminalLocation.Editor
+          : vscode.TerminalLocation.Panel,
     });
     this.links.set(terminal, wt.path);
     this.names.set(terminal, name);
@@ -2530,6 +2538,57 @@ function activate(ctx) {
   });
 
 
+  // ---- terminals as editor tabs --------------------------------------------------------------
+
+  const editorMode = () => vscode.workspace.getConfiguration('agentDeck').get('terminalLocation') === 'editor';
+  const syncEditorModeContext = () => vscode.commands.executeCommand('setContext', 'agentDeck.terminalsInEditor', editorMode());
+  syncEditorModeContext();
+
+  /** The last text editor tab you were in (⌘J goes back to it from the agent's tab). */
+  let lastCodeTab;
+  const isTerminalTab = (tab) => tab?.input instanceof vscode.TabInputTerminal;
+
+  /**
+   * ⌘J in editor-tab mode: on an agent's tab → back to your code; anywhere else → the active
+   * worktree's agent (its last focused terminal, else its first one).
+   */
+  const toggleAgent = async () => {
+    const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
+    if (isTerminalTab(tab)) {
+      if (lastCodeTab) {
+        const input = lastCodeTab.input;
+        const uri = input instanceof vscode.TabInputTextDiff ? undefined : input?.uri;
+        if (input instanceof vscode.TabInputTextDiff) {
+          return vscode.commands.executeCommand('vscode.diff', input.original, input.modified, lastCodeTab.label, { viewColumn: lastCodeTab.group.viewColumn });
+        }
+        if (uri) return vscode.window.showTextDocument(uri, { viewColumn: lastCodeTab.group.viewColumn, preview: false });
+      }
+      return vscode.commands.executeCommand('workbench.action.navigateBack');
+    }
+    const wt = deck.active ? deck.findWorktree(deck.active) : undefined;
+    if (!wt) return;
+    const terms = deck.terminalsOf(wt.path);
+    const last = deck.lastTerminal.get(wt.path);
+    const t = last && terms.includes(last) ? last : terms.find((x) => deck.procs.get(x)?.agent) ?? terms[0];
+    if (t) t.show(false);
+    else deck.createTerminal(wt);
+  };
+
+  /** Move terminals that live in the bottom panel into editor tabs (processes keep running). */
+  const moveTerminalsToEditor = async () => {
+    const termTabs = () => vscode.window.tabGroups.all.flatMap((g) => g.tabs).filter(isTerminalTab).length;
+    const before = termTabs();
+    const active = vscode.window.activeTerminal;
+    for (const t of [...vscode.window.terminals]) {
+      t.show(false);
+      await new Promise((r) => setTimeout(r, 120));
+      // Moves the focused panel terminal; does nothing for one that's already an editor tab.
+      await vscode.commands.executeCommand('workbench.action.terminal.moveToEditor').then(undefined, () => {});
+    }
+    active?.show(false);
+    return termTabs() - before;
+  };
+
   /** Jump to a terminal that needs you: its worktree becomes active and the terminal is focused. */
   const goTo = (t) => {
     const wt = deck.worktreeOf(t);
@@ -2802,6 +2861,29 @@ function activate(ctx) {
       applyRefresh(plan);
     }),
     vscode.commands.registerCommand('agentDeck.goToFileInWorktree', () => goToFile()),
+    vscode.commands.registerCommand('agentDeck.toggleAgent', () => toggleAgent()),
+    vscode.commands.registerCommand('agentDeck.moveTerminalsToEditor', () => moveTerminalsToEditor()),
+    vscode.commands.registerCommand('agentDeck.shellBeside', (arg) => {
+      const wt = resolveWt(arg);
+      if (!wt) return;
+      deck.setActive(wt.path);
+      return deck.createTerminal(wt, { plain: true, beside: true, name: `${wtLabel(wt)} · shell` });
+    }),
+    vscode.window.tabGroups.onDidChangeTabs(() => {
+      const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
+      if (tab && (tab.input instanceof vscode.TabInputText || tab.input instanceof vscode.TabInputTextDiff)) lastCodeTab = tab;
+    }),
+    vscode.workspace.onDidChangeConfiguration(async (e) => {
+      if (!e.affectsConfiguration('agentDeck.terminalLocation')) return;
+      syncEditorModeContext();
+      if (!editorMode() || !vscode.window.terminals.length) return;
+      const n = vscode.window.terminals.length;
+      const c = await vscode.window.showInformationMessage(
+        `Agent Deck: new terminals now open as editor tabs. Move the ${n} open terminal${n === 1 ? '' : 's'} there too? (They keep running.)`,
+        'Move Them',
+      );
+      if (c === 'Move Them') moveTerminalsToEditor();
+    }),
     vscode.commands.registerCommand('agentDeck.openNotes', async (arg) => {
       const wt = resolveWt(arg);
       if (!wt) return;
@@ -3196,7 +3278,7 @@ function activate(ctx) {
     await offerRefreshAfterReload();
   });
 
-  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh, goTo, focusByPid, home, openHome, archiveNotes, closeOtherWorktreeTabs, readClipboardImage, appOfProcess, adoptExternal, pendingMoves, transientNotice, alertItem, ensureNotifier: () => ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')) };
+  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh, goTo, focusByPid, home, openHome, toggleAgent, archiveNotes, closeOtherWorktreeTabs, readClipboardImage, appOfProcess, adoptExternal, pendingMoves, transientNotice, alertItem, ensureNotifier: () => ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')) };
 }
 
 function deactivate() {}

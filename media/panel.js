@@ -13,7 +13,7 @@
     'git-pull-request': '\uea64', 'git-pull-request-draft': '\uebdb', 'git-merge': '\ueafe',
     'git-pull-request-closed': '\uebda', 'play-circle': '\ueba6', check: '\ueab2',
     'link-external': '\ueb14', folder: '\uea83', 'empty-window': '\ueae4',
-    'arrow-up': '\ueaa1', 'arrow-down': '\uea9a', bell: '\ueaa2', 'bell-dot': '\ueb9a', trash: '\uea81', note: '\ueb26', eye: '\uea70',
+    'arrow-up': '\ueaa1', 'arrow-down': '\uea9a', bell: '\ueaa2', 'bell-dot': '\ueb9a', trash: '\uea81', note: '\ueb26', eye: '\uea70', 'split-horizontal': '\ueb56',
   };
 
   /** @type {any} */
@@ -85,7 +85,7 @@
               )
               .join('')
           : `<div class="row" tabindex="-1" data-cmd="agentDeck.newTerminal" data-arg="${esc(JSON.stringify(wtArg))}">${ci('add')}<span class="grow"><span class="name">New terminal</span></span></div>`;
-        return `<div class="sec">Terminals <span class="count">${s.terminals.length || ''}</span><span class="actions">${act('add', 'New Terminal', 'agentDeck.newTerminal', wtArg)}</span></div>${rows}`;
+        return `<div class="sec">Terminals <span class="count">${s.terminals.length || ''}</span><span class="actions">${act('split-horizontal', 'Shell beside the agent (⌘⌥\\)', 'agentDeck.shellBeside', wtArg)}${act('add', 'New Terminal', 'agentDeck.newTerminal', wtArg)}</span></div>${rows}`;
       }
       case 'notes':
         return `<div class="sec">Notes<span class="actions">${act('edit', 'Open notes', 'agentDeck.openNotes', wtArg)}</span></div>

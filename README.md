@@ -26,7 +26,7 @@ Worktrees and terminals, linked, for running many coding agents at once in VS Co
 
 | Setting | Default | |
 |---|---|---|
-| `agentDeck.terminalLocation` | `panel` | `editor` gives each agent a full-size tab |
+| `agentDeck.terminalLocation` | `panel` | `editor` gives each agent a full-size tab; ⌘J then toggles agent ↔ code, ⌘⌥\\ opens a shell beside it, and **Move Terminals to Editor Tabs** moves open ones over |
 | `agentDeck.startupCommand` | `claude` | run in the first terminal of a worktree (extra terminals are plain shells); empty = never |
 | `agentDeck.showOnStartup` | `true` | open the Agent Deck sidebar when the window opens or reloads |
 | `agentDeck.worktreeLabel` | `title` | `title` = Claude session title, `branch` = branch name |

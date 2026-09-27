@@ -734,12 +734,11 @@ exports.run = async function () {
 
     const other = deck.worktrees.find((w) => w.path !== a.path);
     await deck.poll(); // everything fresh
-    const before = deck.statusAt.get(other.path);
-    const activeBefore = deck.statusAt.get(a.path);
-    await sleep(30);
-    await deck.poll(false, { background: true });
-    assert.strictEqual(deck.statusAt.get(other.path), before, 'other worktree not re-read within 16 s');
-    assert.ok(deck.statusAt.get(a.path) > activeBefore, 'active worktree re-read every time');
+    // Which worktrees a background round reads (independent of refreshes the git watcher triggers).
+    const due = (await deck.readStatuses(true)).map(([p]) => p);
+    assert.deepStrictEqual(due, [a.path], 'background round: only the active worktree while the others are fresh');
+    const all = (await deck.readStatuses(false)).map(([p]) => p);
+    assert.strictEqual(all.length, deck.worktrees.length, 'explicit round: every worktree');
     assert.ok(deck.status.has(other.path), 'other worktree keeps its last status');
     console.log('✓ background poll: active worktree read every tick, others skipped while fresh (kept, not dropped)');
   }
@@ -848,6 +847,46 @@ exports.run = async function () {
     console.log('✓ staged diff: real file on the right when unchanged since staging (path + blame); built-in git snapshots otherwise');
     await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
     cpx.execSync('git reset -q -- staged-diff.ts', { cwd: a.path });
+  }
+
+  // Terminals as editor tabs: new ones open as tabs, ⌘J toggles agent ↔ code, shell opens beside,
+  // panel terminals can be moved over (and keep running).
+  {
+    const fsx = require('fs');
+    const cfg = vscode.workspace.getConfiguration('agentDeck');
+    const panelTerm = vscode.window.createTerminal({ name: 'was-in-panel', cwd: a.path });
+    panelTerm.sendText('sleep 120');
+    await sleep(800);
+    await cfg.update('terminalLocation', 'editor', vscode.ConfigurationTarget.Global);
+    const termTabs = () => vscode.window.tabGroups.all.flatMap((g) => g.tabs).filter((x) => x.input instanceof vscode.TabInputTerminal);
+    const before = termTabs().length;
+    const t = deck.createTerminal(deck.findWorktree(a.path), { plain: true, name: 'agent-tab' });
+    await until(() => termTabs().length === before + 1, 'new terminal opened as an editor tab');
+    console.log('✓ editor mode: a new worktree terminal opens as an editor tab');
+
+    const code = path.join(a.path, 'toggle-me.ts');
+    fsx.writeFileSync(code, 'x\n');
+    await vscode.window.showTextDocument(vscode.Uri.file(code), { preview: false });
+    deck.setActive(a.path);
+    deck.lastTerminal.set(a.path, t);
+    await ext.exports.toggleAgent();
+    await until(() => vscode.window.tabGroups.activeTabGroup.activeTab?.input instanceof vscode.TabInputTerminal, '⌘J → agent tab');
+    await ext.exports.toggleAgent();
+    await until(() => vscode.window.activeTextEditor?.document.uri.fsPath === code && !(vscode.window.tabGroups.activeTabGroup.activeTab?.input instanceof vscode.TabInputTerminal), '⌘J → back to the code');
+    console.log('✓ ⌘J flips between the worktree agent tab and the file you were in');
+
+    const shell = await vscode.commands.executeCommand('agentDeck.shellBeside', { wtPath: a.path });
+    await until(() => vscode.window.tabGroups.all.some((g) => g.viewColumn >= 2 && g.tabs.some((x) => x.input instanceof vscode.TabInputTerminal)), 'shell beside');
+    assert.strictEqual(deck.worktreeOf(shell)?.path, a.path);
+    console.log('✓ shell beside opens a plain shell for the worktree in a split to the right');
+
+    const n = await vscode.commands.executeCommand('agentDeck.moveTerminalsToEditor');
+    assert.ok(n >= 1, `moved ${n}`);
+    await until(() => termTabs().some((x) => x.label === 'was-in-panel'), 'panel terminal now a tab');
+    assert.strictEqual(panelTerm.exitStatus, undefined, 'still running');
+    console.log(`✓ moved ${n} panel terminal(s) into editor tabs, still running`);
+    await cfg.update('terminalLocation', undefined, vscode.ConfigurationTarget.Global);
+    panelTerm.dispose();
   }
   console.log('ALL PASSED');
 };
