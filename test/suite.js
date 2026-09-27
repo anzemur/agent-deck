@@ -409,12 +409,13 @@ exports.run = async function () {
     const wt = deck.findWorktree(created);
     assert.ok(wt, `worktree created: ${created}`);
     assert.strictEqual(wt.branch, 'flaky-login-redirect-test');
-    assert.strictEqual(path.basename(path.dirname(created)), `${path.basename(main.path)}.worktrees`);
+    assert.ok(path.relative(main.path, created).startsWith(path.join('.claude', 'worktrees')), `inside the repo: ${created}`);
+    assert.ok(!require('child_process').execSync('git status --porcelain', { cwd: main.path }).toString().includes('.claude'), 'git-ignored in the main checkout');
     assert.strictEqual(deck.active, created);
     await until(() => fsx.existsSync(path.join(created, '.env')), '.env copied by setup', 15000);
     await until(() => require('child_process').spawnSync('pgrep', ['-f', 'claude 120 Fix the flaky login redirect test!']).stdout.toString().trim(), 'claude started with the prompt', 15000);
     assert.strictEqual(wtModel(wt).title, 'Fix the flaky login redirect test!');
-    console.log(`✓ New Task: branch "${wt.branch}", worktree in ${path.basename(path.dirname(created))}/, .env copied, claude started with the prompt, card titled by the task`);
+    console.log(`✓ New Task: branch "${wt.branch}", worktree in ${path.relative(main.path, path.dirname(created))}/ (git-ignored), .env copied, claude started with the prompt, card titled by the task`);
 
     // A repo setup script (.superset/config.json format) wins over the automatic setup.
     fsx.mkdirSync(path.join(main.path, '.superset'), { recursive: true });
@@ -729,19 +730,7 @@ exports.run = async function () {
   // background poll reads git status for the active worktree every time, others only when stale.
   {
     const fsx = require('fs');
-    const { files } = ext.exports;
     deck.setActive(a.path);
-    await until(() => files.root === a.path, 'files root');
-    assert.deepStrictEqual([...files.watchers.keys()], [a.path], 'only the root is watched at first');
-    fsx.mkdirSync(path.join(a.path, 'node_modules/pkg'), { recursive: true });
-    fsx.mkdirSync(path.join(a.path, 'src/deep'), { recursive: true });
-    files.watchDir(path.join(a.path, 'node_modules'));
-    files.watchDir(path.join(a.path, 'src'));
-    assert.ok(!files.watchers.has(path.join(a.path, 'node_modules')), 'node_modules never watched');
-    assert.ok(files.watchers.has(path.join(a.path, 'src')));
-    files.unwatchDir(path.join(a.path, 'src'));
-    assert.deepStrictEqual([...files.watchers.keys()], [a.path]);
-    console.log('✓ Files view: watches the root + expanded folders only, never node_modules; collapsing stops watching');
 
     const other = deck.worktrees.find((w) => w.path !== a.path);
     await deck.poll(); // everything fresh
@@ -815,16 +804,11 @@ exports.run = async function () {
   // The open file is followed: selected in the Files view, highlighted in the Changes list.
   {
     const fsx = require('fs');
-    const { files, filesView } = ext.exports;
     deck.setActive(a.path);
-    await until(() => files.root === a.path, 'files root');
-    await vscode.commands.executeCommand('agentDeck.files.focus');
     fsx.mkdirSync(path.join(a.path, 'src/feature/deep'), { recursive: true });
     const f = path.join(a.path, 'src/feature/deep/open-me.ts');
     fsx.writeFileSync(f, 'export const x = 1;\n');
     await vscode.window.showTextDocument(vscode.Uri.file(f), { preview: false });
-    await until(() => filesView.selection.some((u) => u.fsPath === f), 'selected in Files view', 5000);
-    console.log('✓ opening src/feature/deep/open-me.ts selects it in the Files view (folders expanded)');
     await deck.poll();
     assert.strictEqual(model().activeFile, f);
     const rows = wtModel(a).sections.flatMap((s) => s.files ?? []);

@@ -37,10 +37,6 @@
           "id": "agentDeck.worktrees",
           "name": "Worktrees",
           "type": "webview"
-        },
-        {
-          "id": "agentDeck.files",
-          "name": "Files"
         }
       ]
     },
@@ -138,18 +134,6 @@
       {
         "command": "agentDeck.prevWorktree",
         "title": "Previous Worktree",
-        "category": "Agent Deck"
-      },
-      {
-        "command": "agentDeck.refreshFiles",
-        "title": "Refresh Files",
-        "icon": "$(refresh)",
-        "category": "Agent Deck"
-      },
-      {
-        "command": "agentDeck.collapseFiles",
-        "title": "Collapse All",
-        "icon": "$(collapse-all)",
         "category": "Agent Deck"
       },
       {
@@ -285,16 +269,6 @@
           "command": "agentDeck.refresh",
           "when": "view == agentDeck.worktrees",
           "group": "navigation@3"
-        },
-        {
-          "command": "agentDeck.refreshFiles",
-          "when": "view == agentDeck.files",
-          "group": "navigation@1"
-        },
-        {
-          "command": "agentDeck.collapseFiles",
-          "when": "view == agentDeck.files",
-          "group": "navigation@2"
         },
         {
           "command": "agentDeck.refreshTerminals",
@@ -540,7 +514,7 @@
         "agentDeck.worktreeParentDir": {
           "type": "string",
           "default": "",
-          "description": "Where new worktrees are created. Empty = sibling folder '<repo>.worktrees' next to the repository. Supports ~."
+          "description": "Where new worktrees are created. Empty = <repo>/.claude/worktrees (next to claude -w's; shown in the Explorer, git-ignored). Supports ~."
         },
         "agentDeck.startupCommand": {
           "type": "string",

@@ -928,6 +928,23 @@ function archiveNotes(wt) {
   return out;
 }
 
+/**
+ * Make sure git ignores `rel` in this repo: nothing to do when it already is (e.g. the repo's
+ * .gitignore lists .claude/worktrees), else it goes into the local info/exclude (never a tracked file).
+ */
+async function ignoreInRepo(repoRoot, rel) {
+  const ignored = await git(repoRoot, ['check-ignore', '-q', '--no-index', rel.replace(/\/$/, '') + '/x']).then(() => true, () => false);
+  if (ignored) return;
+  try {
+    const exclude = (await git(repoRoot, ['rev-parse', '--path-format=absolute', '--git-path', 'info/exclude'])).trim();
+    const has = fs.existsSync(exclude) && fs.readFileSync(exclude, 'utf8').split('\n').includes(rel);
+    if (!has) {
+      fs.mkdirSync(path.dirname(exclude), { recursive: true });
+      fs.appendFileSync(exclude, `\n# Agent Deck worktrees\n${rel}\n`);
+    }
+  } catch {}
+}
+
 /** Keep <worktree>/.agent-deck/ out of git, via the repo's local info/exclude (never a tracked file). */
 function excludeAgentDeckDir(wtPath) {
   try {
@@ -2093,137 +2110,6 @@ class HomePage {
   }
 }
 
-// ---------------------------------------------------------------- files tree
-
-/** @implements {vscode.TreeDataProvider<vscode.Uri>} */
-class FilesTree {
-  /** @param {Deck} deck */
-  constructor(deck) {
-    this.deck = deck;
-    this._onDidChange = new vscode.EventEmitter();
-    this.onDidChangeTreeData = this._onDidChange.event;
-    /**
-     * One non-recursive watcher per visible folder (the root and the folders you've expanded).
-     * Watching the whole worktree recursively meant watching node_modules too: `bun install`
-     * writes ~200k files, macOS drops the events and the watcher re-scans everything, repeatedly.
-     * @type {Map<string, vscode.FileSystemWatcher>}
-     */
-    this.watchers = new Map();
-    this.root = undefined;
-    /** @type {Map<string, vscode.FileType>} */
-    this.types = new Map();
-    this.refreshTimer = undefined;
-    this.setRoot(deck.active);
-    deck.onActive((p) => this.setRoot(p));
-  }
-
-  /** Folders never watched (and never worth watching): huge, generated, or git internals. */
-  static unwatched(name) {
-    return /^(node_modules|\.git|\.next|\.turbo|dist|build|out|\.cache|coverage|\.vercel)$/.test(name);
-  }
-
-  get watcher() {
-    return this.watchers.size ? [...this.watchers.values()][0] : undefined; // kept for dispose on deactivate
-  }
-
-  /** Start watching one folder's direct children (not its subfolders). */
-  watchDir(fsPath) {
-    if (this.watchers.has(fsPath) || FilesTree.unwatched(path.basename(fsPath))) return;
-    const w = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(vscode.Uri.file(fsPath), '*'), false, true, false);
-    const kick = () => {
-      clearTimeout(this.refreshTimer);
-      this.refreshTimer = setTimeout(() => this.refresh(), 250);
-    };
-    w.onDidCreate(kick);
-    w.onDidDelete(kick);
-    this.watchers.set(fsPath, w);
-  }
-
-  /** Stop watching a folder and everything under it (it was collapsed). */
-  unwatchDir(fsPath) {
-    for (const [p, w] of this.watchers) {
-      if (p !== this.root && isInside(p, fsPath)) {
-        w.dispose();
-        this.watchers.delete(p);
-      }
-    }
-  }
-
-  disposeWatchers() {
-    for (const w of this.watchers.values()) w.dispose();
-    this.watchers.clear();
-  }
-
-  setRoot(p) {
-    if (p === this.root) return;
-    this.root = p;
-    this.disposeWatchers();
-    if (p) this.watchDir(p);
-    this.refresh();
-  }
-
-  refresh() {
-    this._onDidChange.fire(undefined);
-  }
-
-  excluded(name) {
-    const exclude = vscode.workspace.getConfiguration('files').get('exclude', {});
-    if (name === '.git') return true;
-    return Object.entries(exclude).some(([glob, on]) => on && glob.replace(/^\*\*\//, '') === name);
-  }
-
-  /** @param {vscode.Uri} [uri] */
-  async getChildren(uri) {
-    const dir = uri ?? (this.root ? vscode.Uri.file(this.root) : undefined);
-    if (!dir) return [];
-    let entries;
-    try {
-      entries = await vscode.workspace.fs.readDirectory(dir);
-    } catch {
-      return [];
-    }
-    return entries
-      .filter(([name]) => !this.excluded(name))
-      .sort(([a, at], [b, bt]) => {
-        const ad = at & vscode.FileType.Directory, bd = bt & vscode.FileType.Directory;
-        if (ad !== bd) return ad ? -1 : 1;
-        return a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true });
-      })
-      .map(([name, type]) => {
-        const child = vscode.Uri.joinPath(dir, name);
-        this.types.set(child.toString(), type);
-        return child;
-      });
-  }
-
-  /** Needed for reveal(): the folder above, up to the worktree root. */
-  getParent(uri) {
-    if (!this.root) return undefined;
-    const parent = path.dirname(uri.fsPath);
-    if (!isInside(parent, this.root) || parent === this.root) return undefined;
-    return vscode.Uri.file(parent);
-  }
-
-  /** @param {vscode.Uri} uri */
-  getTreeItem(uri) {
-    let type = this.types.get(uri.toString());
-    if (type === undefined) {
-      // Folders on the way to a revealed file may not have been listed yet.
-      try {
-        type = fs.statSync(uri.fsPath).isDirectory() ? vscode.FileType.Directory : vscode.FileType.File;
-        this.types.set(uri.toString(), type);
-      } catch {
-        type = vscode.FileType.File;
-      }
-    }
-    const isDir = (type & vscode.FileType.Directory) !== 0;
-    const item = new vscode.TreeItem(uri, isDir ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None);
-    item.id = uri.toString();
-    if (!isDir) item.command = { command: 'vscode.open', title: 'Open', arguments: [uri] };
-    return item;
-  }
-}
-
 // ---------------------------------------------------------------- activation
 
 /** @param {vscode.ExtensionContext} ctx */
@@ -2232,9 +2118,7 @@ function activate(ctx) {
   const panel = new PanelProvider(ctx, deck);
   /** Terminals that already existed when this window (re)loaded. */
   const restoredTerminals = new Set(vscode.window.terminals);
-  const files = new FilesTree(deck);
 
-  const filesView = vscode.window.createTreeView('agentDeck.files', { treeDataProvider: files, showCollapseAll: false });
 
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   status.command = 'agentDeck.quickSwitch';
@@ -2247,13 +2131,9 @@ function activate(ctx) {
       status.text = `$(git-branch) ${wtTitle(wt, deck)}${n ? ` ±${n}` : ''}`;
       status.show();
       if (panel.view) panel.view.description = wtTitle(wt, deck);
-      filesView.description = wtLabel(wt);
-      filesView.message = undefined;
     } else {
       status.hide();
       if (panel.view) panel.view.description = undefined;
-      filesView.description = undefined;
-      filesView.message = deck.repos.length ? 'Select a worktree.' : undefined;
     }
   };
   deck.onChange(updateChrome);
@@ -2367,7 +2247,9 @@ function activate(ctx) {
    */
   const createWorktree = async (repo, branch) => {
     const setting = /** @type {string} */ (vscode.workspace.getConfiguration('agentDeck').get('worktreeParentDir') ?? '').trim();
-    const parent = setting ? expandHome(setting) : path.join(path.dirname(repo.root), `${repo.name}.worktrees`);
+    // Default: inside the repo, next to claude -w's worktrees, so the Explorer shows them.
+    const parent = setting ? expandHome(setting) : path.join(repo.root, '.claude', 'worktrees');
+    if (!setting) await ignoreInRepo(repo.root, '.claude/worktrees/');
     let target = path.join(parent, branch.split('/').pop() || branch.replace(/\//g, '-'));
     for (let i = 2; fs.existsSync(target); i++) target = `${target.replace(/-\d+$/, '')}-${i}`;
     const exists = await git(repo.root, ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).then(() => true, () => false);
@@ -2389,6 +2271,8 @@ function activate(ctx) {
       return undefined;
     }
     await deck.refresh();
+    // The repo may exclude .claude/worktrees from file watching (fast), so tell the Explorer.
+    vscode.commands.executeCommand('workbench.files.action.refreshFilesExplorer').then(undefined, () => {});
     return deck.findWorktree(target) ?? deck.worktrees.find((w) => w.branch === branch);
   };
 
@@ -2645,17 +2529,6 @@ function activate(ctx) {
     if (p && vscode.workspace.getConfiguration('agentDeck').get('closeOtherWorktreeTabs', false)) closeOtherWorktreeTabs(p);
   });
 
-  /** Select the open file in the Files view (like the Explorer does), without stealing focus. */
-  let revealTimer;
-  const revealInFiles = () => {
-    clearTimeout(revealTimer);
-    revealTimer = setTimeout(() => {
-      const p = activeFilePath();
-      if (!p || !files.root || !filesView.visible || !isInside(p, files.root) || p === files.root) return;
-      filesView.reveal(vscode.Uri.file(p), { select: true, focus: false, expand: true }).then(undefined, () => {});
-    }, 120);
-  };
-  filesView.onDidChangeVisibility((e) => e.visible && revealInFiles());
 
   /** Jump to a terminal that needs you: its worktree becomes active and the terminal is focused. */
   const goTo = (t) => {
@@ -2842,19 +2715,14 @@ function activate(ctx) {
 
   ctx.subscriptions.push(
     vscode.window.registerWebviewViewProvider('agentDeck.worktrees', panel, { webviewOptions: { retainContextWhenHidden: true } }),
-    filesView,
     status,
     { dispose: () => clearInterval(timer) },
     { dispose: () => deck.gitWatchers.forEach((w) => w.dispose()) },
-    { dispose: () => files.disposeWatchers() },
-    filesView.onDidExpandElement((e) => files.watchDir(e.element.fsPath)),
-    filesView.onDidCollapseElement((e) => files.unwatchDir(e.element.fsPath)),
     vscode.workspace.registerTextDocumentContentProvider(GIT_SCHEME, new GitContent()),
 
     vscode.window.onDidChangeActiveTerminal(syncFromTerminal),
     vscode.window.onDidChangeActiveTextEditor(() => {
       panel.schedule(); // highlight the open file in the Changes list
-      revealInFiles();
     }),
     vscode.workspace.onDidSaveTextDocument((d) => d.uri.fsPath.endsWith(NOTES_REL) && panel.schedule()),
     vscode.window.onDidChangeActiveTextEditor((ed) => ed?.document.uri.scheme === 'file' && noteOpened(ed.document.uri.fsPath)),
@@ -2883,13 +2751,8 @@ function activate(ctx) {
       deck.refresh();
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => deck.refresh()),
-    vscode.workspace.onDidChangeConfiguration((e) => e.affectsConfiguration('files.exclude') && files.refresh()),
 
     vscode.commands.registerCommand('agentDeck.refresh', () => deck.refresh()),
-    vscode.commands.registerCommand('agentDeck.refreshFiles', () => files.refresh()),
-    vscode.commands.registerCommand('agentDeck.collapseFiles', () =>
-      vscode.commands.executeCommand('workbench.actions.treeView.agentDeck.files.collapseAll'),
-    ),
 
     vscode.commands.registerCommand('agentDeck.selectWorktree', (p) => deck.switchTo(p)),
     vscode.commands.registerCommand('agentDeck.quickSwitch', async () => {
@@ -3333,7 +3196,7 @@ function activate(ctx) {
     await offerRefreshAfterReload();
   });
 
-  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh, goTo, focusByPid, files, filesView, home, openHome, archiveNotes, closeOtherWorktreeTabs, readClipboardImage, appOfProcess, adoptExternal, pendingMoves, transientNotice, alertItem, ensureNotifier: () => ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')) };
+  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh, goTo, focusByPid, home, openHome, archiveNotes, closeOtherWorktreeTabs, readClipboardImage, appOfProcess, adoptExternal, pendingMoves, transientNotice, alertItem, ensureNotifier: () => ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')) };
 }
 
 function deactivate() {}
