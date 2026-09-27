@@ -1775,7 +1775,7 @@ function buildModel(deck, termId) {
         const clean = c.path.replace(/\/$/, '');
         const dir = path.dirname(clean);
         return {
-          group, path: c.path, orig: c.orig, code: c.code, letter, colorId, isDir,
+          group, path: c.path, abs: path.join(wt.path, clean), orig: c.orig, code: c.code, letter, colorId, isDir,
           name: path.basename(clean) + (isDir ? '/' : ''),
           dir: dir === '.' ? '' : dir,
           seti: isDir ? null : setiFor(clean),
@@ -1877,9 +1877,21 @@ function buildModel(deck, termId) {
     const repoOrder = new Map(deck.repos.map((r, i) => [r.name, i]));
     const ranked = worktrees.map((w, i) => ({ w, i, r: rank(w) }));
     ranked.sort((x, y) => (repoOrder.get(x.w.repo) ?? 0) - (repoOrder.get(y.w.repo) ?? 0) || x.r[0] - y.r[0] || x.r[1] - y.r[1] || x.i - y.i);
-    return { worktrees: ranked.map((x) => x.w), active: deck.active, multiRepo: deck.repos.length > 1 };
+    return { worktrees: ranked.map((x) => x.w), active: deck.active, activeFile: activeFilePath(), multiRepo: deck.repos.length > 1 };
   }
-  return { worktrees, active: deck.active, multiRepo: deck.repos.length > 1 };
+  return { worktrees, active: deck.active, activeFile: activeFilePath(), multiRepo: deck.repos.length > 1 };
+}
+
+/**
+ * The file in the active editor, as a real path. Diffs count as their file: the working-tree side
+ * is a plain file, the staged side one of our agentdeck-git documents.
+ */
+function activeFilePath() {
+  const uri = vscode.window.activeTextEditor?.document.uri;
+  if (!uri) return undefined;
+  if (uri.scheme === 'file') return uri.fsPath;
+  if (uri.scheme === GIT_SCHEME) return uri.path;
+  return undefined;
 }
 
 /** @implements {vscode.WebviewViewProvider} */
@@ -2168,9 +2180,27 @@ class FilesTree {
       });
   }
 
+  /** Needed for reveal(): the folder above, up to the worktree root. */
+  getParent(uri) {
+    if (!this.root) return undefined;
+    const parent = path.dirname(uri.fsPath);
+    if (!isInside(parent, this.root) || parent === this.root) return undefined;
+    return vscode.Uri.file(parent);
+  }
+
   /** @param {vscode.Uri} uri */
   getTreeItem(uri) {
-    const isDir = ((this.types.get(uri.toString()) ?? 0) & vscode.FileType.Directory) !== 0;
+    let type = this.types.get(uri.toString());
+    if (type === undefined) {
+      // Folders on the way to a revealed file may not have been listed yet.
+      try {
+        type = fs.statSync(uri.fsPath).isDirectory() ? vscode.FileType.Directory : vscode.FileType.File;
+        this.types.set(uri.toString(), type);
+      } catch {
+        type = vscode.FileType.File;
+      }
+    }
+    const isDir = (type & vscode.FileType.Directory) !== 0;
     const item = new vscode.TreeItem(uri, isDir ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None);
     item.id = uri.toString();
     if (!isDir) item.command = { command: 'vscode.open', title: 'Open', arguments: [uri] };
@@ -2599,6 +2629,18 @@ function activate(ctx) {
     if (p && vscode.workspace.getConfiguration('agentDeck').get('closeOtherWorktreeTabs', false)) closeOtherWorktreeTabs(p);
   });
 
+  /** Select the open file in the Files view (like the Explorer does), without stealing focus. */
+  let revealTimer;
+  const revealInFiles = () => {
+    clearTimeout(revealTimer);
+    revealTimer = setTimeout(() => {
+      const p = activeFilePath();
+      if (!p || !files.root || !filesView.visible || !isInside(p, files.root) || p === files.root) return;
+      filesView.reveal(vscode.Uri.file(p), { select: true, focus: false, expand: true }).then(undefined, () => {});
+    }, 120);
+  };
+  filesView.onDidChangeVisibility((e) => e.visible && revealInFiles());
+
   /** Jump to a terminal that needs you: its worktree becomes active and the terminal is focused. */
   const goTo = (t) => {
     const wt = deck.worktreeOf(t);
@@ -2794,6 +2836,10 @@ function activate(ctx) {
     vscode.workspace.registerTextDocumentContentProvider(GIT_SCHEME, new GitContent()),
 
     vscode.window.onDidChangeActiveTerminal(syncFromTerminal),
+    vscode.window.onDidChangeActiveTextEditor(() => {
+      panel.schedule(); // highlight the open file in the Changes list
+      revealInFiles();
+    }),
     vscode.workspace.onDidSaveTextDocument((d) => d.uri.fsPath.endsWith(NOTES_REL) && panel.schedule()),
     vscode.window.onDidChangeActiveTextEditor((ed) => ed?.document.uri.scheme === 'file' && noteOpened(ed.document.uri.fsPath)),
     vscode.window.onDidOpenTerminal(() => {
@@ -3259,7 +3305,7 @@ function activate(ctx) {
     await offerRefreshAfterReload();
   });
 
-  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh, goTo, focusByPid, files, home, openHome, archiveNotes, closeOtherWorktreeTabs, readClipboardImage, appOfProcess, adoptExternal, pendingMoves, transientNotice, alertItem, ensureNotifier: () => ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')) };
+  return { deck, panel, model: () => panel.model(), searchRootFor, updateBadge, listWorktreeFiles, picker: () => lastPicker, runTeardown, staleAfterReload, applyRefresh, goTo, focusByPid, files, filesView, home, openHome, archiveNotes, closeOtherWorktreeTabs, readClipboardImage, appOfProcess, adoptExternal, pendingMoves, transientNotice, alertItem, ensureNotifier: () => ensureNotifier(path.join(ctx.extensionPath, 'media', 'terminal-notifier-3.1.0.zip')) };
 }
 
 function deactivate() {}

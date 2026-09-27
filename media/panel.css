@@ -123,3 +123,7 @@ body.vscode-light .seti, body.vscode-high-contrast-light .seti { color: var(--fc
 .wt .cleanup { flex: none; margin-top: -2px; }
 .wt .cleanup .act { color: var(--vscode-charts-purple, #a371f7); }
 
+
+/* the file open in the editor */
+.row.current { background: var(--vscode-list-inactiveSelectionBackground); box-shadow: inset 2px 0 0 var(--c); }
+.row.current .name { font-weight: 600; }

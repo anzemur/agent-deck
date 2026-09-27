@@ -41,7 +41,10 @@
   function renderFile(w, f) {
     const arg = { wtPath: w.path, group: f.group, path: f.path, orig: f.orig, code: f.code };
     const stageBtn = f.group === 'staged' ? act('remove', 'Unstage', 'agentDeck.unstage', arg) : act('add', 'Stage', 'agentDeck.stage', arg);
-    return `<div class="row" tabindex="-1" data-cmd="agentDeck.openChange" data-arg="${esc(JSON.stringify(arg))}"
+    // The open file, or (for a new folder git lists as one row) the folder it's in.
+    const open = model?.activeFile;
+    const current = !!open && (open === f.abs || (f.isDir && open.startsWith(`${f.abs}/`)));
+    return `<div class="row ${current ? 'current' : ''}" tabindex="-1" data-cmd="agentDeck.openChange" data-arg="${esc(JSON.stringify(arg))}"
         title="${esc(f.tooltip)}" data-vscode-context="${ctx({ webviewSection: f.group === 'staged' ? 'stagedChange' : 'change', ...arg })}">
       ${fileIcon(f)}
       <span class="grow"><span class="name" style="color:${cssVar(f.colorId)}">${esc(f.name)}</span><span class="sub">${esc(f.dir)}</span></span>

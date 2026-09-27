@@ -811,5 +811,32 @@ exports.run = async function () {
     console.log(`✓ notes: .agent-deck/notes.md per worktree, preview "${sec.preview.slice(0, 30)}…" on the card, git-ignored, archived as ${path.basename(kept)}`);
     await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
   }
+
+  // The open file is followed: selected in the Files view, highlighted in the Changes list.
+  {
+    const fsx = require('fs');
+    const { files, filesView } = ext.exports;
+    deck.setActive(a.path);
+    await until(() => files.root === a.path, 'files root');
+    await vscode.commands.executeCommand('agentDeck.files.focus');
+    fsx.mkdirSync(path.join(a.path, 'src/feature/deep'), { recursive: true });
+    const f = path.join(a.path, 'src/feature/deep/open-me.ts');
+    fsx.writeFileSync(f, 'export const x = 1;\n');
+    await vscode.window.showTextDocument(vscode.Uri.file(f), { preview: false });
+    await until(() => filesView.selection.some((u) => u.fsPath === f), 'selected in Files view', 5000);
+    console.log('✓ opening src/feature/deep/open-me.ts selects it in the Files view (folders expanded)');
+    await deck.poll();
+    assert.strictEqual(model().activeFile, f);
+    const rows = wtModel(a).sections.flatMap((s) => s.files ?? []);
+    const folderRow = rows.find((x) => x.isDir && f.startsWith(`${x.abs}/`));
+    assert.ok(folderRow, 'a new file inside a new folder shows as that folder, which gets highlighted');
+    fsx.writeFileSync(path.join(a.path, 'README.md'), 'edited again\n');
+    await vscode.window.showTextDocument(vscode.Uri.file(path.join(a.path, 'README.md')), { preview: false });
+    await deck.poll();
+    assert.strictEqual(model().activeFile, path.join(a.path, 'README.md'));
+    assert.ok(wtModel(a).sections.flatMap((s) => s.files ?? []).some((x) => x.abs === model().activeFile), 'changed file row matches the open file');
+    console.log('✓ the Changes list highlights the open file (or the new folder it sits in)');
+    await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+  }
   console.log('ALL PASSED');
 };
