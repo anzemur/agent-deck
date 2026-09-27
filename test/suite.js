@@ -838,5 +838,32 @@ exports.run = async function () {
     console.log('✓ the Changes list highlights the open file (or the new folder it sits in)');
     await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
   }
+
+  // Staged diffs: the right side is the real file when disk == staged (path bar + blame work);
+  // snapshots come from the editor's own git support.
+  {
+    const fsx = require('fs');
+    const cpx = require('child_process');
+    const f = path.join(a.path, 'staged-diff.ts');
+    fsx.writeFileSync(f, 'export const v = 1;\n');
+    cpx.execSync('git add staged-diff.ts && git -c user.email=t@t -c user.name=t commit -qm sd', { cwd: a.path });
+    fsx.writeFileSync(f, 'export const v = 2;\n');
+    cpx.execSync('git add staged-diff.ts', { cwd: a.path });
+    await vscode.commands.executeCommand('agentDeck.openChange', { wtPath: a.path, group: 'staged', path: 'staged-diff.ts', code: 'M ' });
+    await until(() => vscode.window.activeTextEditor?.document.uri.fsPath === f, 'staged diff open');
+    const right = vscode.window.activeTextEditor.document.uri;
+    assert.strictEqual(right.scheme, 'file', 'staged diff shows the real file on the right');
+    const tabIn = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+    assert.ok(tabIn instanceof vscode.TabInputTextDiff && tabIn.original.scheme === 'git', `left side is a built-in git snapshot (${tabIn?.original?.scheme})`);
+    await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+    fsx.writeFileSync(f, 'export const v = 3;\n'); // edited after staging
+    await vscode.commands.executeCommand('agentDeck.openChange', { wtPath: a.path, group: 'staged', path: 'staged-diff.ts', code: 'MM' });
+    await until(() => vscode.window.tabGroups.activeTabGroup.activeTab?.input instanceof vscode.TabInputTextDiff, 'second diff');
+    const tab2 = vscode.window.tabGroups.activeTabGroup.activeTab.input;
+    assert.strictEqual(tab2.modified.scheme, 'git', 'edited after staging: right side is the staged snapshot');
+    console.log('✓ staged diff: real file on the right when unchanged since staging (path + blame); built-in git snapshots otherwise');
+    await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+    cpx.execSync('git reset -q -- staged-diff.ts', { cwd: a.path });
+  }
   console.log('ALL PASSED');
 };

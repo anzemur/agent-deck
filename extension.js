@@ -700,6 +700,22 @@ function cwdOption(t) {
   return typeof cwd === 'string' ? cwd : cwd.fsPath;
 }
 
+/**
+ * A read-only version of a file at HEAD or in the index. Prefers the editor's built-in git
+ * documents (what Source Control uses), which the editor and GitLens understand (path bar,
+ * blame); falls back to our own when the git extension doesn't know the repo.
+ * @param {'HEAD' | 'index'} at
+ */
+async function snapshotUri(fileUri, at, cwd, relPath) {
+  try {
+    const ext = vscode.extensions.getExtension('vscode.git');
+    const api = (ext?.isActive ? ext.exports : await ext?.activate())?.getAPI(1);
+    const known = api?.repositories.some((r) => isInside(fileUri.fsPath, r.rootUri.fsPath)) || (api && (await api.openRepository?.(vscode.Uri.file(cwd))));
+    if (api && known) return api.toGitUri(fileUri, at === 'HEAD' ? 'HEAD' : '');
+  } catch {}
+  return gitUri(cwd, relPath, at === 'HEAD' ? 'HEAD' : ':');
+}
+
 /** Content at `ref` (empty ref = empty document), served by GitContent. */
 function gitUri(cwd, relPath, ref) {
   return vscode.Uri.from({ scheme: GIT_SCHEME, path: path.join(cwd, relPath), query: JSON.stringify({ cwd, ref }) });
@@ -3046,7 +3062,7 @@ function activate(ctx) {
       panel.schedule();
     }),
 
-    vscode.commands.registerCommand('agentDeck.openChange', (arg) => {
+    vscode.commands.registerCommand('agentDeck.openChange', async (arg) => {
       const wt = resolveWt(arg);
       if (!wt || !arg.path) return;
       const group = arg.group;
@@ -3055,13 +3071,25 @@ function activate(ctx) {
       const name = path.basename(c.path);
       if (c.code === '??') return vscode.commands.executeCommand('vscode.open', file);
       // Staged: HEAD ↔ index. Unstaged: index ↔ working tree. (Same as the Source Control view.)
-      const [lRef, rRef, title] =
-        group === 'staged' ? ['HEAD', ':', 'Index'] : [':', undefined, 'Working Tree'];
-      const leftPath = group === 'staged' ? c.orig ?? c.path : c.path;
-      const left = gitUri(wt.path, leftPath, c.code[0] === 'A' && group === 'staged' ? '' : lRef);
-      const deletedHere = (group === 'staged' ? c.code[0] : c.code[1]) === 'D';
-      const right = deletedHere ? gitUri(wt.path, c.path, '') : rRef ? gitUri(wt.path, c.path, rRef) : file;
-      return vscode.commands.executeCommand('vscode.diff', left, right, `${name} (${wtLabel(wt)} · ${title})`);
+      const staged = group === 'staged';
+      const leftPath = staged ? c.orig ?? c.path : c.path;
+      const leftUri = vscode.Uri.file(path.join(wt.path, leftPath));
+      const addedHere = staged && c.code[0] === 'A';
+      const deletedHere = (staged ? c.code[0] : c.code[1]) === 'D';
+      const left = addedHere ? gitUri(wt.path, leftPath, '') : await snapshotUri(leftUri, staged ? 'HEAD' : 'index', wt.path, leftPath);
+      let right;
+      if (deletedHere) {
+        right = gitUri(wt.path, c.path, '');
+      } else if (!staged) {
+        right = file;
+      } else {
+        // The real file whenever it's what's staged (the usual case): the diff then gets the path
+        // bar and git blame like any file. Edited since staging: the staged version, as a snapshot
+        // the editor's own git support understands.
+        const same = await git(wt.path, ['diff', '--quiet', '--', c.path]).then(() => true, () => false);
+        right = same ? file : await snapshotUri(file, 'index', wt.path, c.path);
+      }
+      return vscode.commands.executeCommand('vscode.diff', left, right, `${name} (${wtLabel(wt)} · ${staged ? 'Staged' : 'Working Tree'})`);
     }),
     vscode.commands.registerCommand('agentDeck.openChangedFile', (arg) => {
       const wt = resolveWt(arg);
