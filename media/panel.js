@@ -13,7 +13,7 @@
     'git-pull-request': '\uea64', 'git-pull-request-draft': '\uebdb', 'git-merge': '\ueafe',
     'git-pull-request-closed': '\uebda', 'play-circle': '\ueba6', check: '\ueab2',
     'link-external': '\ueb14', folder: '\uea83', 'empty-window': '\ueae4',
-    'arrow-up': '\ueaa1', 'arrow-down': '\uea9a', bell: '\ueaa2', 'bell-dot': '\ueb9a', trash: '\uea81', note: '\ueb26',
+    'arrow-up': '\ueaa1', 'arrow-down': '\uea9a', bell: '\ueaa2', 'bell-dot': '\ueb9a', trash: '\uea81', note: '\ueb26', eye: '\uea70',
   };
 
   /** @type {any} */
@@ -49,6 +49,7 @@
       ${fileIcon(f)}
       <span class="grow"><span class="name" style="color:${cssVar(f.colorId)}">${esc(f.name)}</span><span class="sub">${esc(f.dir)}</span></span>
       <span class="actions">${act('go-to-file', 'Open File', 'agentDeck.openChangedFile', arg)}${stageBtn}</span>
+      ${current ? `<i class="ci open-mark" title="Open in the editor" aria-label="open">${CI.eye}</i>` : ''}
       <span class="end" style="color:${cssVar(f.colorId)}">${esc(f.letter)}</span>
     </div>`;
   }
