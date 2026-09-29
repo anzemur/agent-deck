@@ -536,6 +536,17 @@ exports.run = async function () {
     assert.deepStrictEqual(rest.filter((p) => !deck.worktrees.some((w) => w.path === p && deck.terminalsOf(p).some((t) => deck.isWorking(t) || deck.isIdleAgent(t)))),
       def.filter((p) => p !== target.path && !deck.worktrees.some((w) => w.path === p && deck.terminalsOf(p).some((t) => deck.isWorking(t) || deck.isIdleAgent(t)))));
     console.log(`✓ sort by attention: "${path.basename(target.path)}" (needs you) moves from #${def.indexOf(target.path) + 1} to #1; the rest keep their order`);
+    // A second agent finishing later goes above the first.
+    const second = deck.worktrees.find((w) => !w.isMain && w !== target && deck.terminalsOf(w.path).length);
+    if (second) {
+      deck.attentionOf = (t) => {
+        const p = deck.worktreeOf(t)?.path;
+        return p === target.path ? { kind: 'done', since: 1000 } : p === second.path ? { kind: 'done', since: 2000 } : undefined;
+      };
+      deck._onChange.fire();
+      await until(() => model().worktrees[0].path === second.path && model().worktrees[1].path === target.path, 'latest finished on top, previous second');
+      console.log('✓ the latest agent to finish goes on top; the previous one moves to #2');
+    }
     await vscode.commands.executeCommand('agentDeck.sortDefault');
     await until(() => model().worktrees.map((w) => w.path).join() === def.join(), 'back to default order');
     console.log('✓ toggling back restores the default order');

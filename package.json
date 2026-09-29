@@ -623,10 +623,10 @@
             "default",
             "attention"
           ],
-          "default": "default",
+          "default": "attention",
           "enumDescriptions": [
             "git's worktree order (main checkout first)",
-            "Needs you first, then working, then idle, then the rest"
+            "Needs you first (latest to finish on top), then working, then idle (latest on top), then the rest"
           ],
           "description": "Order of worktrees in the panel. Also toggled from the bell in the Worktrees header."
         },

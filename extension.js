@@ -1931,17 +1931,19 @@ function buildModel(deck, termId) {
     };
   });
   if (vscode.workspace.getConfiguration('agentDeck').get('sortBy') === 'attention') {
-    // Needs you (blocked first, then done; longest waiting on top) → working → idle → the rest.
-    // Stable within each group (and within each repo), so rows only move when their state changes.
+    // Needs you → working → idle → the rest. Within needs-you and idle, the latest to finish is on
+    // top, so a newly finished agent jumps to #1 and pushes the others down. Working and the rest
+    // keep their order (within each repo), so rows only move when an agent's state changes.
+    const latest = (xs) => -Math.max(0, ...xs.map((x) => x ?? 0));
     const rank = (w) => {
       const terms = deck.terminalsOf(w.path);
       const ext = deck.externalsOf(w.path);
       const atts = [...terms.map((t) => deck.attentionOf(t)), ...ext.map((e) => deck.attentionOfExternal(e))].filter(Boolean);
-      if (atts.some((a) => a?.kind === 'waiting')) return [0, Math.min(...atts.map((a) => a?.since ?? 0))];
-      if (atts.length) return [1, Math.min(...atts.map((a) => a?.since ?? 0))];
-      if (terms.some((t) => deck.isWorking(t)) || ext.some((e) => e.status === 'busy')) return [2, 0];
-      if (terms.some((t) => deck.isIdleAgent(t)) || ext.length) return [3, 0];
-      return [4, 0];
+      if (atts.length) return [0, latest(atts.map((a) => a?.since))];
+      if (terms.some((t) => deck.isWorking(t)) || ext.some((e) => e.status === 'busy')) return [1, 0];
+      const idle = terms.filter((t) => deck.isIdleAgent(t));
+      if (idle.length || ext.length) return [2, latest([...idle.map((t) => deck.procs.get(t)?.statusSince), ...ext.map((e) => e.statusSince)])];
+      return [3, 0];
     };
     const repoOrder = new Map(deck.repos.map((r, i) => [r.name, i]));
     const ranked = worktrees.map((w, i) => ({ w, i, r: rank(w) }));
@@ -2652,10 +2654,13 @@ function activate(ctx) {
         // Showing terminals below fires focus events; keep them from being read as worktree switches.
         spotlightQuietUntil = Infinity;
         try {
-          if (prev && (await activate(prev, true))) {
-            await vscode.commands.executeCommand('workbench.action.terminal.moveToTerminalPanel').then(undefined, () => {});
-            spotlit = undefined;
+          // Moving back sometimes doesn't take (focus lands elsewhere): check the tab is gone, retry.
+          const inEditor = (x) => vscode.window.tabGroups.all.some((g) => g.tabs.some((tab) => tab.input instanceof vscode.TabInputTerminal && tab.label === x.name));
+          for (let i = 0; prev && i < 3 && inEditor(prev); i++) {
+            if (await activate(prev, true)) await vscode.commands.executeCommand('workbench.action.terminal.moveToTerminalPanel').then(undefined, () => {});
+            await new Promise((r) => setTimeout(r, 80));
           }
+          if (prev) spotlit = undefined;
           if (!(await activate(t))) return;
           await vscode.commands.executeCommand('workbench.action.terminal.moveToEditor').then(undefined, () => {});
           spotlit = t;
