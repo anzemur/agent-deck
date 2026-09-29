@@ -52,7 +52,7 @@ const COLORS = [
 /** @typedef {{ kind: 'waiting' | 'done', since: number, reason: string | undefined }} Attention  agent needs you: blocked on a question/approval, or finished unseen work */
 /** @typedef {{ sessionId: string, wtPath: string, name: string }} AgentRecord  a Claude session to bring back after a restart */
 /** @typedef {{ title: string | undefined, prs: { number: number, url: string }[], cwd?: string }} SessionInfo  cwd = folder of its latest steps */
-/** @typedef {{ number: number, url: string, title: string | undefined, state: string | undefined, isDraft: boolean, own: boolean, headRefOid?: string }} PullRequest  own = this worktree's branch is its head */
+/** @typedef {{ number: number, url: string, title: string | undefined, state: string | undefined, isDraft: boolean, own: boolean, headRefOid?: string, coversHead?: boolean }} PullRequest  own = this worktree's branch is its head */
 
 /** @typedef {'staged' | 'unstaged'} Group */
 
@@ -1309,13 +1309,40 @@ class Deck {
     this.prsLoading = true;
     try {
       const next = new Map();
-      for (const w of this.worktrees) next.set(w.path, await readPrs(w, this.sessions.get(w.path)));
+      for (const w of this.worktrees) {
+        const prs = await readPrs(w, this.sessions.get(w.path));
+        for (const pr of prs) if (pr.own) pr.coversHead = await this.prCoversHead(w, pr);
+        next.set(w.path, prs);
+      }
       const changed = JSON.stringify([...next]) !== JSON.stringify([...this.prs]);
       this.prs = next;
       if (changed) this._onChange.fire();
     } finally {
       this.prsLoading = false;
     }
+  }
+
+  /**
+   * Whether a finished PR contains everything the worktree has committed: it's on the PR's last
+   * commit, or behind it (e.g. a bot pushed translations onto the branch after you). Cached per pair.
+   */
+  async prCoversHead(wt, pr) {
+    if (!pr.headRefOid || !wt.head) return false;
+    if (pr.headRefOid === wt.head) return true;
+    if (pr.state !== 'MERGED' && pr.state !== 'CLOSED') return false;
+    const key = `${wt.head}..${pr.headRefOid}`;
+    this.coversCache ??= new Map();
+    if (this.coversCache.has(key)) return this.coversCache.get(key);
+    const isAncestor = () =>
+      git(wt.path, ['merge-base', '--is-ancestor', wt.head, pr.headRefOid]).then(() => true, (e) => (/not a valid|bad object|no such/i.test(e.message) ? undefined : false));
+    let ok = await isAncestor();
+    if (ok === undefined) {
+      // The PR's last commit isn't here yet (pushed by someone else): fetch just that commit.
+      await git(wt.path, ['fetch', '--quiet', '--no-tags', 'origin', pr.headRefOid]).catch(() => {});
+      ok = (await isAncestor()) ?? false;
+    }
+    this.coversCache.set(key, ok);
+    return ok;
   }
 
   /**
@@ -1395,7 +1422,7 @@ class Deck {
 
   /**
    * A worktree you're done with and can delete without losing anything: its branch's latest PR is
-   * merged or closed, the worktree sits exactly on the commit that PR was made from, there are no
+   * merged or closed, the worktree has no commits the PR doesn't (it's on its last commit or behind it), there are no
    * uncommitted changes, and nothing is running in it.
    * @returns {{ pr: PullRequest } | undefined}
    */
@@ -1403,7 +1430,7 @@ class Deck {
     if (wt.isMain || wt.locked) return undefined;
     const pr = (this.prs.get(wt.path) ?? []).find((p) => p.own);
     if (!pr || (pr.state !== 'MERGED' && pr.state !== 'CLOSED')) return undefined;
-    if (!pr.headRefOid || pr.headRefOid !== wt.head) return undefined; // local commits beyond the PR
+    if (!(pr.headRefOid && pr.headRefOid === wt.head) && !pr.coversHead) return undefined; // local commits beyond the PR
     const st = this.status.get(wt.path);
     if (!st || st.changes.length) return undefined;
     const busy =

@@ -453,7 +453,7 @@ exports.run = async function () {
       cpx.execSync(`git worktree add -q -b ${b} ${p} HEAD`, { cwd: main.path });
       return p;
     };
-    const pDone = mk('done-x'), pDirty = mk('dirty-y'), pAhead = mk('ahead-z');
+    const pDone = mk('done-x'), pDirty = mk('dirty-y'), pAhead = mk('ahead-z'), pBehind = mk('behind-w');
     fsx.writeFileSync(path.join(pDirty, 'wip.txt'), 'unsaved work');
     cpx.execSync('git -c user.email=t@t -c user.name=t commit -q --allow-empty -m local-only', { cwd: pAhead });
     await deck.refresh();
@@ -466,14 +466,21 @@ exports.run = async function () {
     deck.prs.set(pDone, [{ number: 7, url: 'u7', title: 'x', state: 'MERGED', isDraft: false, own: true, headRefOid: head(pDone) }]);
     deck.prs.set(pDirty, [{ number: 8, url: 'u8', title: 'y', state: 'MERGED', isDraft: false, own: true, headRefOid: head(pDirty) }]);
     deck.prs.set(pAhead, [{ number: 9, url: 'u9', title: 'z', state: 'MERGED', isDraft: false, own: true, headRefOid: base }]);
+    // Someone (a translations bot) pushed onto the PR after this worktree's last commit.
+    const behindPr = { number: 10, url: 'u10', title: 'w', state: 'MERGED', isDraft: false, own: true, headRefOid: head(pAhead) };
+    behindPr.coversHead = await deck.prCoversHead(deck.findWorktree(pBehind), behindPr);
+    deck.prs.set(pBehind, [behindPr]);
+    const aheadPr = deck.prs.get(pAhead)[0];
+    assert.strictEqual(await deck.prCoversHead(deck.findWorktree(pAhead), aheadPr), false);
     await deck.poll();
     const m = (p) => model().worktrees.find((w) => w.path === p);
     assert.ok(m(pDone).cleanable && m(pDone).meta.some((x) => x.text === 'merged · clean up'));
     assert.ok(!m(pDirty).cleanable, 'dirty worktree must not be offered');
     assert.ok(!m(pAhead).cleanable, 'worktree with commits beyond the PR must not be offered');
+    assert.ok(m(pBehind).cleanable, 'worktree behind its merged PR (bot pushed after) is finished');
     console.log('✓ "merged · clean up" shows only on the finished worktree (not on one with uncommitted work or extra commits)');
     const res = await vscode.commands.executeCommand('agentDeck.cleanUpWorktrees', { all: true });
-    assert.deepStrictEqual(res.map((r) => path.basename(r.path)), ['cleanup-done-x']);
+    assert.deepStrictEqual(res.map((r) => path.basename(r.path)).sort(), ['cleanup-behind-w', 'cleanup-done-x']);
     assert.ok(!fsx.existsSync(pDone) && fsx.existsSync(pDirty) && fsx.existsSync(pAhead));
     assert.ok(!cpx.execSync('git branch --list done-x', { cwd: main.path }).toString().trim(), 'merged branch deleted');
     console.log('✓ Clean Up removed only the finished worktree and its merged branch; the others are untouched');
