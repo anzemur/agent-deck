@@ -176,6 +176,21 @@ exports.run = async function () {
   require('child_process').execSync('git reset -q -- stale.txt', { cwd: a.path }); // panel is now stale
   await vscode.commands.executeCommand('agentDeck.unstage', { wtPath: a.path, group: 'staged' });
   await until(() => deck.changesOf(a.path, 'staged').length === 0, 'Unstage All completes despite a stale (untracked) path');
+
+  // A new folder shows its files one by one, not as a single folder row.
+  {
+    const fsx = require('fs');
+    fsx.mkdirSync(path.join(a.path, 'new-dir', 'sub'), { recursive: true });
+    fsx.writeFileSync(path.join(a.path, 'new-dir', 'one.ts'), '1');
+    fsx.writeFileSync(path.join(a.path, 'new-dir', 'sub', 'two.ts'), '2');
+    await deck.poll(true);
+    await until(() => deck.changesOf(a.path, 'unstaged').some((c) => c.path === 'new-dir/sub/two.ts'), 'files inside a new folder listed');
+    const paths = deck.changesOf(a.path, 'unstaged').map((c) => c.path);
+    assert.ok(paths.includes('new-dir/one.ts') && !paths.includes('new-dir/'), JSON.stringify(paths));
+    console.log('✓ new folders list each file inside them as its own change');
+    fsx.rmSync(path.join(a.path, 'new-dir'), { recursive: true, force: true });
+    await deck.poll(true);
+  }
   console.log('✓ unstage ignores paths already gone from the index; batch still completes');
 
   // Index changes made outside the extension in a non-active linked worktree reach the panel via
@@ -829,8 +844,7 @@ exports.run = async function () {
     await deck.poll();
     assert.strictEqual(model().activeFile, f);
     const rows = wtModel(a).sections.flatMap((s) => s.files ?? []);
-    const folderRow = rows.find((x) => x.isDir && f.startsWith(`${x.abs}/`));
-    assert.ok(folderRow, 'a new file inside a new folder shows as that folder, which gets highlighted');
+    assert.ok(rows.some((x) => !x.isDir && x.abs === f), 'a new file inside a new folder has its own row, which gets highlighted');
     fsx.writeFileSync(path.join(a.path, 'README.md'), 'edited again\n');
     await vscode.window.showTextDocument(vscode.Uri.file(path.join(a.path, 'README.md')), { preview: false });
     await deck.poll();

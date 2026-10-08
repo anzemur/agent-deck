@@ -107,11 +107,18 @@ async function listWorktrees(cwd) {
   return result.filter((w) => !w.bare).map(({ bare, ...w }) => w);
 }
 
+const MAX_UNTRACKED_ROWS = 300;
+
 /** @returns {Promise<WtStatus | undefined>} */
 async function readStatus(wtPath) {
   let out;
   try {
-    out = await git(wtPath, ['status', '--porcelain=v1', '-z', '-b', '--untracked-files=normal']);
+    // Every new file gets its own row (new folders aren't one opaque row), unless an un-ignored
+    // build output or similar floods the list: then fall back to git's one-row-per-folder view.
+    out = await git(wtPath, ['status', '--porcelain=v1', '-z', '-b', '--untracked-files=all']);
+    if (out.split('\0').filter((p) => p.startsWith('?? ')).length > MAX_UNTRACKED_ROWS) {
+      out = await git(wtPath, ['status', '--porcelain=v1', '-z', '-b', '--untracked-files=normal']);
+    }
   } catch {
     return undefined;
   }
